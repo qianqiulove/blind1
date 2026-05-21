@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="nav_status_idle">Status: idle</string>
+    <string name="nav_guidance_prefix">Guidance:</string>
+    <string name="hint_host">Host/IP</string>
+    <string name="hint_port">Port</string>
+    <string name="nav_connect">Connect</string>
+    <string name="nav_start">Start Nav</string>
+    <string name="nav_stop">Stop Nav</string>
+    <string name="nav_traffic_test">Traffic Test</string>
+    <string name="nav_comprehensive_test">Comprehensive Test</string>
+    <string name="nav_overlay_off">Overlay Off</string>
+
+    <string name="tab_nav">导航</string>
+    <string name="tab_map">定位导航</string>
+    <string name="tab_ai">AI助手</string>
+
+    <string name="map_title">📍 定位导航</string>
+    <string name="map_locate_me">定位我的位置</string>
+    <string name="map_destination_hint">输入目的地</string>
+    <string name="map_search_icon">🔍</string>
+    <string name="map_more">更多</string>
+    <string name="map_status_waiting">状态：等待定位...</string>
+    <string name="map_current_location_label">当前位置：</string>
+    <string name="map_nearest_blind_label">距离最近盲道：</string>
+    <string name="map_route_summary_empty">路线摘要：暂无</string>
+    <string name="common_unknown">未知</string>
+
+    <string name="assistant_title">AI 助手</string>
+    <string name="assistant_intro">你好！我是你的AI助手，可以帮你：</string>
+    <string name="assistant_capability_map">🗺️ 查地图 — 路线规划、附近搜索</string>
+    <string name="assistant_capability_message">💬 发消息 — 给家属发送消息</string>
+    <string name="assistant_capability_voice">🎤 语音输入 — 点击麦克风按钮说话</string>
+    <string name="assistant_voice_diag_default">语音诊断：待检测</string>
+    <string name="assistant_family_placeholder">给家属发消息（功能预留）</string>
+    <string name="assistant_input_hint">输入问题，例如：附近地铁站在哪里？</string>
+    <string name="assistant_mic_icon">🎤</string>
+    <string name="assistant_tts_on">朗读开</string>
+    <string name="assistant_tts_off">朗读关</string>
+    <string name="assistant_send">发送</string>
+</resources>
