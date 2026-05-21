@@ -1,18 +1,9 @@
-﻿# Python
+.venv/
 __pycache__/
 *.pyc
-.venv/
-env/
-
-# Android/IDE
-.gradle/
-build/
 .idea/
-*.iml
-local.properties
+android/.gradle/
+android/local.properties
+android/.idea/
+android/app/build/
 
-# OS
-.DS_Store
-Thumbs.db
-models/trafficlight.pt
-models/yolo-seg.pt

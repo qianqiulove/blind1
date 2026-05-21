@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
@@ -25,6 +25,8 @@ class BlindInference:
 class TrafficInference:
     light: str
     confidence: float
+    raw_label: str = "unknown"
+    stable_label: str = "unknown"
 
 
 class BlindMaskStabilizer:
@@ -211,6 +213,42 @@ class ModelRuntime:
         self._track_center_ema: Optional[float] = None
         self._track_dx_ema: float = 0.0
         self._branch_detected_recently: bool = False
+        self._traffic_history: list[str] = []
+        self._traffic_last_stable_label: str = "unknown"
+        self._traffic_last_stable_ttl: int = 0
+        self._traffic_unknown_streak: int = 0
+
+    _TRAFFIC_FILTERED_CLASSES = {"crossing", "blank", "countdown_blank"}
+    _TRAFFIC_VALID_LABELS = {"red", "green"}
+    _TRAFFIC_HISTORY_SIZE = 6
+    _TRAFFIC_MAJORITY = 3
+    _TRAFFIC_STABLE_HOLD_FRAMES = 8
+    _TRAFFIC_CONF_PASS1 = 0.45
+    _TRAFFIC_CONF_PASS2 = 0.35
+    _TRAFFIC_CONF_PASS3 = 0.30
+
+    @staticmethod
+    def _normalize_traffic_label(name: str) -> str:
+        s = name.lower().strip()
+        if "red" in s or "stop" in s:
+            return "red"
+        if "green" in s or "go" in s:
+            return "green"
+        if "off" in s:
+            return "off"
+        if "crossing" in s:
+            return "crossing"
+        if "blank" in s:
+            return "blank"
+        return "unknown"
+
+    @staticmethod
+    def _label_to_light(label: str) -> str:
+        if label == "red":
+            return "red"
+        if label == "green":
+            return "green"
+        return "unknown"
 
     def _resolve_device(self) -> str:
         if self.requested_device.startswith("cuda"):
@@ -501,14 +539,14 @@ class ModelRuntime:
         turn = self._turn_ema
 
         if abs(off) > 0.24:
-            return "请向左平移，对准盲道。" if off < 0 else "请向右平移，对准盲道。"
+            return "请向左转动。" if off < 0 else "请向右转动。"
         if abs(off) > 0.12:
-            return "请微调向左，保持在盲道中央。" if off < 0 else "请微调向右，保持在盲道中央。"
+            return "请向左微调，对准盲道。" if off < 0 else "请向右微调，对准盲道。"
         if turn < -0.18:
-            return "盲道向左延伸，请轻微左转并前进。"
+            return "请向左转动。"
         if turn > 0.18:
-            return "盲道向右延伸，请轻微右转并前进。"
-        return "继续直行，保持在盲道中央。"
+            return "请向右转动。"
+        return "保持直行"
 
     def load(self) -> None:
         self.device = self._resolve_device()
@@ -532,65 +570,144 @@ class ModelRuntime:
         try:
             blind_raw, _ = self._detect_path_and_crosswalk(bgr)
         except Exception:
-            return BlindInference(False, "盲道识别失败。", 0.0, None)
+            return BlindInference(False, "丢失路径，重新搜索。", 0.0, None)
 
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         stable = self.blind_stabilizer.stabilize(blind_raw, gray)
         if stable is None:
-            return BlindInference(False, "未检测到盲道，请微调拍摄方向。", 0.0, None)
+            return BlindInference(False, "丢失路径，重新搜索。", 0.0, None)
 
         h, w = stable.shape[:2]
         area = int(np.count_nonzero(stable))
         if area < max(700, int(h * w * 0.0015)):
-            return BlindInference(False, "未检测到盲道，请微调拍摄方向。", 0.0, None)
+            return BlindInference(False, "丢失路径，重新搜索。", 0.0, None)
 
         offset, turn = self._compute_blind_features(stable)
         return BlindInference(True, self._guidance_from_features(offset, turn), offset, stable)
 
     def infer_traffic(self, bgr: np.ndarray) -> TrafficInference:
         if self.traffic_model is None:
-            return TrafficInference("unknown", 0.0)
-        try:
-            result = self.traffic_model.predict(
-                source=bgr,
-                device=self.device,
-                verbose=False,
-                conf=0.30,
-                imgsz=512,
-            )[0]
-        except Exception:
-            return TrafficInference("unknown", 0.0)
+            return TrafficInference("unknown", 0.0, "unknown", "unknown")
+        def _predict(frame: np.ndarray, conf_thr: float, imgsz: int):
+            try:
+                return self.traffic_model.predict(
+                    source=frame,
+                    device=self.device,
+                    verbose=False,
+                    conf=conf_thr,
+                    imgsz=imgsz,
+                )[0]
+            except Exception:
+                return None
 
-        boxes = getattr(result, "boxes", None)
-        names = getattr(result, "names", {}) or {}
-        if boxes is None or getattr(boxes, "cls", None) is None or len(boxes) == 0:
-            return TrafficInference("unknown", 0.0)
+        def _extract_candidates(result_obj) -> list[tuple[str, float]]:
+            if result_obj is None:
+                return []
+            boxes = getattr(result_obj, "boxes", None)
+            names = getattr(result_obj, "names", {}) or {}
+            if boxes is None or getattr(boxes, "cls", None) is None or len(boxes) == 0:
+                return []
+            cls_raw = boxes.cls
+            conf_raw = boxes.conf
+            if torch is not None and isinstance(cls_raw, torch.Tensor):
+                cls_vals = cls_raw.detach().cpu().numpy().tolist()
+            else:
+                cls_vals = np.asarray(cls_raw).tolist()
+            if torch is not None and isinstance(conf_raw, torch.Tensor):
+                conf_vals = conf_raw.detach().cpu().numpy().tolist()
+            else:
+                conf_vals = np.asarray(conf_raw).tolist()
+            out: list[tuple[str, float]] = []
+            for cls_v, conf in zip(cls_vals, conf_vals):
+                name = self._class_name(names, int(cls_v))
+                norm = self._normalize_traffic_label(name)
+                if norm in self._TRAFFIC_FILTERED_CLASSES:
+                    continue
+                out.append((norm, float(conf)))
+            out.sort(key=lambda x: x[1], reverse=True)
+            return out
 
-        cls_raw = boxes.cls
-        conf_raw = boxes.conf
-        if torch is not None and isinstance(cls_raw, torch.Tensor):
-            cls_vals = cls_raw.detach().cpu().numpy().tolist()
+        def _enhance_for_red_scene(frame: np.ndarray) -> np.ndarray:
+            # Improve dark/overexposed lamp scenes for red-light recall.
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            h, s, v = cv2.split(hsv)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            v = clahe.apply(v)
+            s = cv2.addWeighted(s, 1.1, s, 0.0, 0.0)
+            hsv2 = cv2.merge((h, s, v))
+            return cv2.cvtColor(hsv2, cv2.COLOR_HSV2BGR)
+
+        def _center_roi(frame: np.ndarray) -> np.ndarray:
+            # Traffic light is usually near center/top in mobile preview.
+            h, w = frame.shape[:2]
+            x0 = max(0, int(w * 0.10))
+            x1 = min(w, int(w * 0.90))
+            y0 = max(0, int(h * 0.05))
+            y1 = min(h, int(h * 0.85))
+            roi = frame[y0:y1, x0:x1]
+            if roi.size == 0:
+                return frame
+            return roi
+
+        # Pass-1: stricter standard inference to reduce false positives.
+        candidates = _extract_candidates(_predict(bgr, conf_thr=self._TRAFFIC_CONF_PASS1, imgsz=640))
+        # Pass-2: retry with enhanced image if still unknown.
+        if not any(lbl in self._TRAFFIC_VALID_LABELS for lbl, _ in candidates):
+            enhanced = _enhance_for_red_scene(bgr)
+            retry = _extract_candidates(_predict(enhanced, conf_thr=self._TRAFFIC_CONF_PASS2, imgsz=736))
+            if retry:
+                candidates = retry
+        # Pass-3: center ROI retry for close-up lights.
+        if not any(lbl in self._TRAFFIC_VALID_LABELS for lbl, _ in candidates):
+            roi = _center_roi(bgr)
+            roi_enh = _enhance_for_red_scene(roi)
+            retry_roi = _extract_candidates(_predict(roi_enh, conf_thr=self._TRAFFIC_CONF_PASS3, imgsz=896))
+            if retry_roi:
+                candidates = retry_roi
+
+        detected_label = "unknown"
+        detected_conf = 0.0
+        for label, conf in candidates:
+            if label in self._TRAFFIC_VALID_LABELS:
+                detected_label = label
+                detected_conf = conf
+                break
+
+        # Majority vote across recent frames for stable label.
+        self._traffic_history.append(detected_label)
+        if len(self._traffic_history) > self._TRAFFIC_HISTORY_SIZE:
+            self._traffic_history.pop(0)
+
+        stable_label = "unknown"
+        valid_recent = [x for x in self._traffic_history if x in self._TRAFFIC_VALID_LABELS]
+        if len(valid_recent) >= self._TRAFFIC_MAJORITY:
+            counter: dict[str, int] = {}
+            for x in valid_recent:
+                counter[x] = counter.get(x, 0) + 1
+            label, hits = max(counter.items(), key=lambda kv: kv[1])
+            if hits >= self._TRAFFIC_MAJORITY:
+                stable_label = label
+                self._traffic_last_stable_label = label
+                self._traffic_last_stable_ttl = self._TRAFFIC_STABLE_HOLD_FRAMES
+
+        if stable_label == "unknown" and self._traffic_last_stable_ttl > 0:
+            if self._traffic_last_stable_label in self._TRAFFIC_VALID_LABELS:
+                stable_label = self._traffic_last_stable_label
+                self._traffic_last_stable_ttl -= 1
+
+        if detected_label == "unknown":
+            self._traffic_unknown_streak += 1
+            if self._traffic_unknown_streak % 20 == 1:
+                top = candidates[0] if candidates else ("none", 0.0)
+                print(
+                    f"[BLIND][TRAFFIC] unknown streak={self._traffic_unknown_streak} "
+                    f"top_candidate={top[0]} conf={top[1]:.2f}"
+                )
         else:
-            cls_vals = np.asarray(cls_raw).tolist()
-        if torch is not None and isinstance(conf_raw, torch.Tensor):
-            conf_vals = conf_raw.detach().cpu().numpy().tolist()
-        else:
-            conf_vals = np.asarray(conf_raw).tolist()
+            self._traffic_unknown_streak = 0
 
-        candidates: list[tuple[str, float]] = []
-        for cls_v, conf in zip(cls_vals, conf_vals):
-            name = self._class_name(names, int(cls_v)).lower()
-            light = "unknown"
-            if "stop" in name or "red" in name:
-                light = "red"
-            elif "go" in name or "crossing" in name or "green" in name:
-                light = "green"
-            elif "yellow" in name:
-                light = "yellow"
-            candidates.append((light, float(conf)))
+        # Prefer stable label, but fall back to current-frame label for faster response.
+        chosen_label = stable_label if stable_label in self._TRAFFIC_VALID_LABELS else detected_label
+        light = self._label_to_light(chosen_label)
+        return TrafficInference(light, detected_conf, raw_label=detected_label, stable_label=stable_label)
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        for light, conf in candidates:
-            if light != "unknown":
-                return TrafficInference(light, conf)
-        return TrafficInference("unknown", candidates[0][1] if candidates else 0.0)

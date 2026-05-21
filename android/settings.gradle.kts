@@ -11,9 +11,9 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven(url = "https://maven.baidu.com/repository/maven-public/")
     }
 }
 
 rootProject.name = "blind-v1"
 include(":app")
-

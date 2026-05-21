@@ -7,6 +7,7 @@ class NavCommandResponse(BaseModel):
     ok: bool = True
     nav_enabled: bool
     state: str
+    mode: str = "blind_nav"
 
 
 class FeatureDisabledResponse(BaseModel):
@@ -24,3 +25,50 @@ class GuidancePayload(BaseModel):
     blind_contour: list[list[float]] = Field(default_factory=list)
     frame_id: int = 0
     timestamp: float = Field(default=0.0)
+
+
+class MapRouteRequest(BaseModel):
+    origin_lat: float
+    origin_lng: float
+    dest_lat: float
+    dest_lng: float
+    mode: str = "walking"
+    coordtype: str = "bd09ll"
+
+
+class MapGeocodeRequest(BaseModel):
+    address: str
+    city: str | None = None
+
+
+class MapReverseGeocodeRequest(BaseModel):
+    lat: float
+    lng: float
+    coordtype: str = "bd09ll"
+
+
+class ChatHistoryItem(BaseModel):
+    role: str
+    content: str
+
+
+class AssistantChatRequest(BaseModel):
+    message: str
+    user_location: dict[str, float] | None = None
+    chat_history: list[ChatHistoryItem] = Field(default_factory=list)
+
+
+class AssistantToolHistoryItem(BaseModel):
+    step: int
+    action: str
+    params: dict = Field(default_factory=dict)
+    reasoning: str = ""
+    result: dict = Field(default_factory=dict)
+
+
+class AssistantChatResponse(BaseModel):
+    status: str = "ok"
+    content: str
+    iterations: int = 0
+    tool_history: list[AssistantToolHistoryItem] = Field(default_factory=list)
+    error: str = ""

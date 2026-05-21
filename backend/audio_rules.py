@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import audioop
 import json
@@ -9,8 +9,9 @@ from typing import Dict
 
 
 def _normalize_text(v: str) -> str:
-    v = v.lower().strip()
-    v = re.sub(r"[，。！？、,.!?\s]", "", v)
+    """Keep CJK/alnum and strip punctuation/spaces for robust key matching."""
+    v = (v or "").lower().strip()
+    v = re.sub(r"[^\w\u4e00-\u9fff]+", "", v, flags=re.UNICODE)
     return v
 
 
@@ -35,7 +36,7 @@ class VoiceRuleEngine:
                 if f.exists():
                     self.key_to_file[_normalize_text(key)] = f
 
-        # fallback manual mapping for key commands if map file key encoding is unusable
+        # Fallback: map each wav stem directly.
         for p in self.voice_dir.glob("*.wav"):
             self.key_to_file.setdefault(_normalize_text(p.stem), p)
         for p in self.voice_dir.glob("*.WAV"):
@@ -53,18 +54,29 @@ class VoiceRuleEngine:
         return self._load_pcm_8k_mono(wav_path)
 
     def _fallback_for_text(self, key: str) -> Path | None:
+        # Token-based fallback so slightly different wording can still play audio.
         fallback_pairs = [
+            ("等待绿灯", "正在等待绿灯…"),
+            ("绿灯稳定", "绿灯稳定，开始通行。"),
+            ("绿灯可以通行", "绿灯稳定，开始通行。"),
+            ("绿灯快没了", "绿灯快没了"),
+            ("红灯请等待", "红灯"),
+            ("红灯，请等待。", "红灯"),
+            ("绿灯，可以通行。", "绿灯稳定，开始通行。"),
+            ("保持直行", "保持直行"),
+            ("未检测到盲道", "没看到盲道，请向左侧小幅移动。"),
+            ("未识别到红绿灯", "正在等待绿灯…"),
+            ("向左微调", "请向左微调，对准盲道。"),
+            ("向右微调", "请向右微调，对准盲道。"),
+            ("向左转", "请向左转动。"),
+            ("向右转", "请向右转动。"),
+            ("丢失路径", "丢失路径，重新搜索。"),
+            ("没看到盲道", "没看到盲道，请向左侧小幅移动。"),
             ("红灯", "红灯"),
             ("绿灯", "绿灯"),
-            ("右平移", "向右平移"),
-            ("左平移", "向左平移"),
-            ("右微调", "请向右微调，对准盲道。"),
-            ("左微调", "请向左微调，对准盲道。"),
-            ("继续前进", "方向正确，请继续前进。"),
-            ("未检测到盲道", "没看到盲道，请向右侧小幅移动。"),
         ]
         for token, alias in fallback_pairs:
-            if token in key:
+            if _normalize_text(token) in key:
                 p = self.key_to_file.get(_normalize_text(alias))
                 if p is not None:
                     return p
@@ -90,4 +102,3 @@ class VoiceRuleEngine:
 
         self._cache[wav_path] = frames
         return frames
-

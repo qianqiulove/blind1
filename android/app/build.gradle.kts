@@ -1,7 +1,25 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) {
+        f.inputStream().use { load(it) }
+    }
+}
+
+fun asQuoted(value: String): String {
+    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
+    return "\"$escaped\""
+}
+
+val iflytekAppId = (localProps.getProperty("IFLYTEK_APP_ID") ?: "").trim()
+val iflytekApiKey = (localProps.getProperty("IFLYTEK_API_KEY") ?: "").trim()
+val iflytekApiSecret = (localProps.getProperty("IFLYTEK_API_SECRET") ?: "").trim()
 
 android {
     namespace = "com.blind.v1"
@@ -13,6 +31,13 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        manifestPlaceholders["BAIDU_MAP_AK"] = (project.findProperty("BAIDU_MAP_AK") as String?) ?: ""
+        buildConfigField("String", "IFLYTEK_APP_ID", asQuoted(iflytekAppId))
+        buildConfigField("String", "IFLYTEK_API_KEY", asQuoted(iflytekApiKey))
+        buildConfigField("String", "IFLYTEK_API_SECRET", asQuoted(iflytekApiSecret))
+    }
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {
@@ -46,5 +71,8 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.json:json:20240303")
+    implementation("com.baidu.lbsyun:BaiduMapSDK_Map:7.6.4")
+    implementation(files("libs/SparkChain.aar"))
+    implementation(files("libs/Codec.aar"))
+    implementation("com.google.code.gson:gson:2.8.8")
 }
-

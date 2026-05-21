@@ -1,23 +1,45 @@
 package com.blind.v1
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import androidx.camera.core.ImageProxy
 import java.io.ByteArrayOutputStream
 
 object ImageProxyUtils {
-    fun toJpegBytes(image: ImageProxy, quality: Int = 70): ByteArray? {
+    fun toJpegBytes(image: ImageProxy, quality: Int = 70, rotateToUpright: Boolean = true): ByteArray? {
         if (image.format != ImageFormat.YUV_420_888) return null
 
         val nv21 = yuv420ToNv21(image)
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         val out = ByteArrayOutputStream()
-        return if (yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), quality, out)) {
+        val rawJpeg = if (yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), quality, out)) {
             out.toByteArray()
         } else {
             null
         }
+        if (rawJpeg == null) return null
+
+        val rotation = ((image.imageInfo.rotationDegrees % 360) + 360) % 360
+        if (!rotateToUpright || rotation == 0) return rawJpeg
+
+        val srcBitmap = BitmapFactory.decodeByteArray(rawJpeg, 0, rawJpeg.size) ?: return rawJpeg
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        val rotated = try {
+            Bitmap.createBitmap(srcBitmap, 0, 0, srcBitmap.width, srcBitmap.height, matrix, true)
+        } catch (_: Exception) {
+            srcBitmap.recycle()
+            return rawJpeg
+        }
+        srcBitmap.recycle()
+
+        val rotatedOut = ByteArrayOutputStream()
+        val ok = rotated.compress(Bitmap.CompressFormat.JPEG, quality, rotatedOut)
+        rotated.recycle()
+        return if (ok) rotatedOut.toByteArray() else rawJpeg
     }
 
     private fun yuv420ToNv21(image: ImageProxy): ByteArray {
