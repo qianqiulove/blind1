@@ -72,3 +72,40 @@ class AssistantChatResponse(BaseModel):
     iterations: int = 0
     tool_history: list[AssistantToolHistoryItem] = Field(default_factory=list)
     error: str = ""
+
+
+class MobileLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class MobileAuthUser(BaseModel):
+    user_id: int
+    username: str
+    email: str = ""
+    user_settings: dict = Field(default_factory=dict)
+
+
+class MobileLoginResponse(BaseModel):
+    status: str = "ok"
+    token: str
+    expires_at: str
+    user: MobileAuthUser
+
+
+class MobileSimpleResponse(BaseModel):
+    status: str = "ok"
+    message: str = ""
+
+
+class MobileRegisterRequest(BaseModel):
+    username: str
+    email: str
+    code: str
+    password: str
+
+
+class MobileResetPasswordRequest(BaseModel):
+    email: str
+    code: str
+    new_password: str

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
@@ -14,85 +14,161 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
 
-        <LinearLayout
+        <ScrollView
             android:id="@+id/pageNav"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:orientation="vertical">
-
-            <FrameLayout
-                android:id="@+id/previewContainer"
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1">
-
-                <androidx.camera.view.PreviewView
-                    android:id="@+id/previewView"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent" />
-
-                <ImageView
-                    android:id="@+id/viewerImage"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:background="#000000"
-                    android:scaleType="centerCrop"
-                    android:visibility="gone" />
-            </FrameLayout>
+            android:fillViewport="true"
+            android:padding="12dp">
 
             <LinearLayout
-                android:id="@+id/panel"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:background="#E6FFFFFF"
-                android:orientation="vertical"
-                android:padding="12dp">
-
-                <TextView
-                    android:id="@+id/tvStatus"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/nav_status_idle"
-                    android:textColor="#111111"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/tvGuidance"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/nav_guidance_prefix"
-                    android:textColor="#111111"
-                    android:textSize="16sp" />
+                android:orientation="vertical">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:gravity="center_vertical"
                     android:orientation="horizontal">
 
-                    <EditText
-                        android:id="@+id/etHost"
+                    <TextView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_weight="2.2"
-                        android:hint="@string/hint_host"
-                        android:inputType="text"
-                        android:maxLines="1"
-                        android:padding="8dp"
+                        android:layout_weight="1"
+                        android:text="@string/nav_brand_title"
+                        android:textColor="#003DC7"
+                        android:textSize="20sp"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/btnSosPlaceholder"
+                        android:layout_width="72dp"
+                        android:layout_height="40dp"
+                        android:backgroundTint="#E03131"
+                        android:text="@string/nav_sos"
+                        android:textColor="#FFFFFF" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="#FFFFFF"
+                    android:orientation="vertical"
+                    android:padding="14dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/nav_summary_title"
+                        android:textColor="#003DC7"
+                        android:textSize="20sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvJourneyDate"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/nav_summary_subtitle"
+                        android:textColor="#60676E"
                         android:textSize="14sp" />
 
-                    <EditText
-                        android:id="@+id/etPort"
-                        android:layout_width="0dp"
+                    <LinearLayout
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:hint="@string/hint_port"
-                        android:inputType="number"
-                        android:maxLines="1"
-                        android:padding="8dp"
-                        android:textSize="14sp" />
+                        android:layout_marginTop="10dp"
+                        android:gravity="end"
+                        android:orientation="horizontal">
+
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:gravity="end"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/tvJourneyDurationValue"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="0"
+                                android:textColor="#003DC7"
+                                android:textSize="28sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="@string/nav_summary_duration_unit"
+                                android:textColor="#737688"
+                                android:textSize="11sp" />
+                        </LinearLayout>
+
+                    </LinearLayout>
+                </LinearLayout>
+
+                <FrameLayout
+                    android:id="@+id/previewContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="280dp"
+                    android:layout_marginTop="12dp"
+                    android:background="#000000">
+
+                    <androidx.camera.view.PreviewView
+                        android:id="@+id/previewView"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent" />
+
+                    <ImageView
+                        android:id="@+id/viewerImage"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:background="#000000"
+                        android:scaleType="centerCrop"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/tvTrackingChip"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="top|start"
+                        android:layout_margin="10dp"
+                        android:background="#D9FFFFFF"
+                        android:paddingLeft="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingRight="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="@string/nav_tracking"
+                        android:textColor="#003DC7"
+                        android:textSize="13sp" />
+                </FrameLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="#FFFFFF"
+                    android:orientation="vertical"
+                    android:padding="12dp">
+
+                    <TextView
+                        android:id="@+id/tvStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/nav_status_idle"
+                        android:textColor="#111111"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvGuidance"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/nav_guidance_idle"
+                        android:textColor="#111111"
+                        android:textSize="15sp" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -104,80 +180,66 @@
                     <Button
                         android:id="@+id/btnConnect"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="52dp"
                         android:layout_weight="1"
-                        android:text="@string/nav_connect" />
-
-                    <Button
-                        android:id="@+id/btnStart"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/nav_start" />
+                        android:backgroundTint="#0051FF"
+                        android:text="@string/nav_connect"
+                        android:textColor="#FFFFFF" />
 
                     <Button
                         android:id="@+id/btnStop"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
+                        android:layout_height="52dp"
+                        android:layout_marginStart="10dp"
                         android:layout_weight="1"
-                        android:text="@string/nav_stop" />
+                        android:backgroundTint="#E03131"
+                        android:text="@string/nav_stop"
+                        android:textColor="#FFFFFF" />
                 </LinearLayout>
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginTop="14dp"
+                    android:gravity="center_vertical"
                     android:orientation="horizontal">
 
-                    <Button
-                        android:id="@+id/btnTrafficTest"
+                    <TextView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="@string/nav_traffic_test" />
+                        android:text="@string/nav_risk_title"
+                        android:textColor="#041C35"
+                        android:textSize="20sp"
+                        android:textStyle="bold" />
 
-                    <Button
-                        android:id="@+id/btnComprehensiveTest"
-                        android:layout_width="0dp"
+                    <TextView
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/nav_comprehensive_test" />
+                        android:text="@string/nav_risk_all"
+                        android:textColor="#003DC7"
+                        android:textSize="13sp" />
                 </LinearLayout>
 
-                <LinearLayout
+                <TextView
+                    android:id="@+id/tvRiskEmpty"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
+                    android:background="#FFFFFF"
+                    android:padding="12dp"
+                    android:text="@string/nav_risk_empty"
+                    android:textColor="#6C757D"
+                    android:textSize="14sp" />
 
-                    <Button
-                        android:id="@+id/btnDebugOverlay"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/nav_overlay_off" />
-
-                    <Button
-                        android:id="@+id/btnAiReserved"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/tab_ai" />
-
-                    <Button
-                        android:id="@+id/btnMapReserved"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:layout_weight="1"
-                        android:text="@string/tab_map" />
-                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/llRiskTimeline"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="vertical" />
             </LinearLayout>
-        </LinearLayout>
+        </ScrollView>
 
         <ScrollView
             android:id="@+id/pageMap"
@@ -217,51 +279,53 @@
 
                     <Button
                         android:id="@+id/btnLocateMe"
-                        android:layout_width="wrap_content"
+                        android:layout_width="0dp"
                         android:layout_height="48dp"
+                        android:layout_weight="1"
                         android:backgroundTint="#FFFFFF"
                         android:elevation="2dp"
                         android:text="@string/map_locate_me"
                         android:textColor="#333333" />
 
-                    <LinearLayout
+                    <Button
+                        android:id="@+id/btnMapMore"
                         android:layout_width="0dp"
                         android:layout_height="48dp"
                         android:layout_marginStart="10dp"
                         android:layout_weight="1"
-                        android:orientation="horizontal">
-
-                        <EditText
-                            android:id="@+id/etMapDestination"
-                            android:layout_width="0dp"
-                            android:layout_height="match_parent"
-                            android:layout_weight="1"
-                            android:background="#FFFFFF"
-                            android:hint="@string/map_destination_hint"
-                            android:inputType="text"
-                            android:maxLines="1"
-                            android:padding="10dp"
-                            android:textColor="#222222"
-                            android:textSize="16sp" />
-
-                        <Button
-                            android:id="@+id/btnMapSearch"
-                            android:layout_width="48dp"
-                            android:layout_height="match_parent"
-                            android:backgroundTint="#4DABF7"
-                            android:text="@string/map_search_icon"
-                            android:textColor="#FFFFFF" />
-                    </LinearLayout>
-
-                    <Button
-                        android:id="@+id/btnMapMore"
-                        android:layout_width="wrap_content"
-                        android:layout_height="48dp"
-                        android:layout_marginStart="10dp"
                         android:backgroundTint="#FFFFFF"
                         android:elevation="2dp"
                         android:text="@string/map_more"
                         android:textColor="#333333" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:orientation="horizontal">
+
+                    <EditText
+                        android:id="@+id/etMapDestination"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_weight="1"
+                        android:background="#FFFFFF"
+                        android:hint="@string/map_destination_hint"
+                        android:inputType="text"
+                        android:maxLines="1"
+                        android:padding="10dp"
+                        android:textColor="#222222"
+                        android:textSize="16sp" />
+
+                    <Button
+                        android:id="@+id/btnMapSearch"
+                        android:layout_width="56dp"
+                        android:layout_height="match_parent"
+                        android:layout_marginStart="10dp"
+                        android:backgroundTint="#4DABF7"
+                        android:text="@string/map_search_icon"
+                        android:textColor="#FFFFFF" />
                 </LinearLayout>
 
                 <FrameLayout
@@ -303,30 +367,6 @@
 
                         <TextView
                             android:id="@+id/tvMapCurrentLocationValue"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:gravity="end"
-                            android:text="@string/common_unknown"
-                            android:textColor="#222222"
-                            android:textSize="20sp" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:orientation="horizontal">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="@string/map_nearest_blind_label"
-                            android:textColor="#222222"
-                            android:textSize="20sp" />
-
-                        <TextView
-                            android:id="@+id/tvMapNearestBlindValue"
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
@@ -458,45 +498,202 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:background="#FFFFFF"
-                android:orientation="horizontal"
+                android:orientation="vertical"
                 android:padding="8dp">
 
-                <EditText
-                    android:id="@+id/etAssistantInput"
-                    android:layout_width="0dp"
-                    android:layout_height="48dp"
-                    android:layout_weight="1"
-                    android:background="#F1F3F5"
-                    android:hint="@string/assistant_input_hint"
-                    android:maxLines="2"
-                    android:padding="10dp"
-                    android:textColor="#212529"
-                    android:textSize="15sp" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
 
-                <Button
-                    android:id="@+id/btnAssistantMic"
-                    android:layout_width="52dp"
-                    android:layout_height="48dp"
-                    android:layout_marginStart="8dp"
-                    android:text="@string/assistant_mic_icon" />
+                    <EditText
+                        android:id="@+id/etAssistantInput"
+                        android:layout_width="0dp"
+                        android:layout_height="52dp"
+                        android:layout_weight="1"
+                        android:background="#F1F3F5"
+                        android:hint="@string/assistant_input_hint"
+                        android:maxLines="1"
+                        android:padding="12dp"
+                        android:textColor="#212529"
+                        android:textSize="16sp" />
 
-                <Button
-                    android:id="@+id/btnAssistantTtsToggle"
-                    android:layout_width="80dp"
-                    android:layout_height="48dp"
-                    android:layout_marginStart="8dp"
-                    android:text="@string/assistant_tts_on" />
+                    <Button
+                        android:id="@+id/btnAssistantSend"
+                        android:layout_width="88dp"
+                        android:layout_height="52dp"
+                        android:layout_marginStart="8dp"
+                        android:backgroundTint="#4DABF7"
+                        android:text="@string/assistant_send"
+                        android:textColor="#FFFFFF" />
+                </LinearLayout>
 
-                <Button
-                    android:id="@+id/btnAssistantSend"
-                    android:layout_width="72dp"
-                    android:layout_height="48dp"
-                    android:layout_marginStart="8dp"
-                    android:backgroundTint="#4DABF7"
-                    android:text="@string/assistant_send"
-                    android:textColor="#FFFFFF" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btnAssistantMic"
+                        android:layout_width="88dp"
+                        android:layout_height="52dp"
+                        android:text="@string/assistant_mic_icon"
+                        android:textSize="24sp" />
+
+                    <Button
+                        android:id="@+id/btnAssistantTtsToggle"
+                        android:layout_width="0dp"
+                        android:layout_height="52dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:text="@string/assistant_tts_on" />
+                </LinearLayout>
             </LinearLayout>
         </LinearLayout>
+
+        <ScrollView
+            android:id="@+id/pageSettings"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:fillViewport="true"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#FFFFFF"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    android:id="@+id/tvSettingsTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_title"
+                    android:textColor="#2D8CF0"
+                    android:textSize="24sp"
+                    android:textStyle="bold" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="10dp"
+                    android:background="#E2E6EA" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:background="#F8F9FA"
+                    android:orientation="vertical"
+                    android:padding="12dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_group_network"
+                        android:textColor="#0F172A"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <EditText
+                        android:id="@+id/etHost"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="10dp"
+                        android:background="#FFFFFF"
+                        android:hint="@string/hint_host"
+                        android:inputType="text"
+                        android:maxLines="1"
+                        android:padding="10dp"
+                        android:textSize="14sp" />
+
+                    <EditText
+                        android:id="@+id/etPort"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="8dp"
+                        android:background="#FFFFFF"
+                        android:hint="@string/hint_port"
+                        android:inputType="number"
+                        android:maxLines="1"
+                        android:padding="10dp"
+                        android:textSize="14sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="#F8F9FA"
+                    android:orientation="vertical"
+                    android:padding="12dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_group_debug"
+                        android:textColor="#0F172A"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/btnToggleDebug"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="10dp"
+                        android:text="@string/nav_debug" />
+
+                    <LinearLayout
+                        android:id="@+id/debugControlsContainer"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal">
+
+                            <Button
+                                android:id="@+id/btnTrafficTest"
+                                android:layout_width="0dp"
+                                android:layout_height="48dp"
+                                android:layout_weight="1"
+                                android:text="@string/nav_traffic_test" />
+
+                            <Button
+                                android:id="@+id/btnComprehensiveTest"
+                                android:layout_width="0dp"
+                                android:layout_height="48dp"
+                                android:layout_marginStart="8dp"
+                                android:layout_weight="1"
+                                android:text="@string/nav_comprehensive_test" />
+                        </LinearLayout>
+
+                        <Button
+                            android:id="@+id/btnDebugOverlay"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="8dp"
+                            android:text="@string/nav_overlay_off" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnLogout"
+                    android:layout_width="match_parent"
+                    android:layout_height="52dp"
+                    android:layout_marginTop="16dp"
+                    android:backgroundTint="#E03131"
+                    android:text="@string/settings_logout"
+                    android:textColor="#FFFFFF" />
+            </LinearLayout>
+        </ScrollView>
     </FrameLayout>
 
     <LinearLayout
@@ -535,6 +732,15 @@
             android:layout_weight="1"
             android:backgroundTint="#E9ECEF"
             android:text="@string/tab_ai"
+            android:textColor="#333333" />
+
+        <Button
+            android:id="@+id/btnTabSettings"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:backgroundTint="#E9ECEF"
+            android:text="@string/tab_settings"
             android:textColor="#333333" />
     </LinearLayout>
 

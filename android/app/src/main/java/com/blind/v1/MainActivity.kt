@@ -51,6 +51,16 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.iflytek.cloud.InitListener
+import com.iflytek.cloud.SpeechConstant
+import com.iflytek.cloud.SpeechError
+import com.iflytek.cloud.SpeechEvent
+import com.iflytek.cloud.SpeechUtility
+import com.iflytek.cloud.VoiceWakeuper
+import com.iflytek.cloud.WakeuperListener
+import com.iflytek.cloud.WakeuperResult
+import com.iflytek.cloud.util.ResourceUtil
+import com.iflytek.cloud.util.ResourceUtil.RESOURCE_TYPE
 import com.iflytek.sparkchain.core.LogLvl
 import com.iflytek.sparkchain.core.SparkChain
 import com.iflytek.sparkchain.core.SparkChainConfig
@@ -69,7 +79,10 @@ import okhttp3.WebSocketListener
 import okio.ByteString.Companion.toByteString
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.SocketTimeoutException
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executors
@@ -82,20 +95,27 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etPort: EditText
     private lateinit var tvStatus: TextView
     private lateinit var tvGuidance: TextView
+    private lateinit var tvJourneyDurationValue: TextView
+    private lateinit var llRiskTimeline: LinearLayout
+    private lateinit var tvRiskEmpty: TextView
 
     private lateinit var pageNav: View
     private lateinit var pageMap: View
     private lateinit var pageAssistant: View
+    private lateinit var pageSettings: View
     private lateinit var btnTabNav: Button
     private lateinit var btnTabMap: Button
     private lateinit var btnTabAssistant: Button
+    private lateinit var btnTabSettings: Button
+    private lateinit var btnLogout: Button
     private lateinit var btnLocateMe: Button
     private lateinit var etMapDestination: EditText
     private lateinit var btnMapSearch: Button
     private lateinit var btnMapMore: Button
+    private lateinit var btnToggleDebug: Button
+    private lateinit var debugControlsContainer: View
     private lateinit var tvMapStatus: TextView
     private lateinit var tvMapCurrentLocationValue: TextView
-    private lateinit var tvMapNearestBlindValue: TextView
     private lateinit var tvMapRouteSummary: TextView
     private lateinit var mapCanvas: FrameLayout
     private var baiduMapView: MapView? = null
@@ -118,6 +138,7 @@ class MainActivity : AppCompatActivity() {
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .callTimeout(60, TimeUnit.SECONDS)
+        .pingInterval(15, TimeUnit.SECONDS)
         .build()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val locationManager by lazy { getSystemService(LOCATION_SERVICE) as LocationManager }
@@ -127,19 +148,36 @@ class MainActivity : AppCompatActivity() {
     private var wsAudio: WebSocket? = null
     private var wsViewer: WebSocket? = null
     private var wsAsrProxy: WebSocket? = null
+    private var wsCameraConnected = false
+    private var wsGuidanceConnected = false
+    private var wsAudioConnected = false
+    private var wsViewerConnected = false
 
     private var isConnected = false
     private var isNavEnabled = false
-    private var openCount = 0
     private var lastGuidanceText: String = ""
     private var currentWsBase: String = ""
     private var currentTab: Int = TAB_NAV
+    private var debugControlsVisible: Boolean = false
+    private var pendingAutoStartNav: Boolean = false
+    private var navRunning: Boolean = false
+    private var logoutInProgress: Boolean = false
+    private var navSessionStartedAtMs: Long = 0L
+    private val riskEvents = ArrayDeque<RiskTimelineItem>()
+    private var lastRiskGuidanceText: String = ""
+    private var lastRiskAddedAtMs: Long = 0L
+    private val riskTimeFormatter = SimpleDateFormat("HH:mm", Locale.CHINA)
 
     private var viewerEnabled: Boolean = false
     private var viewerHasFreshFrame: Boolean = false
     private var lastViewerFrameAtMs: Long = 0L
+    private var lastViewerHeartbeatAtMs: Long = 0L
     private var viewerReconnectScheduled = false
     private var viewerMonitorStarted = false
+    private var coreReconnectScheduled = false
+    private var coreReconnectAttempt = 0
+    private var coreReconnectRunnable: Runnable? = null
+    private var suppressReconnectUntilMs = 0L
     @Volatile
     private var viewerDecodeBusy: Boolean = false
 
@@ -169,6 +207,14 @@ class MainActivity : AppCompatActivity() {
     private var sparkAsrRetryCount: Int = 0
     private var sparkAsrRetryPending: Boolean = false
     private var sparkAsrTimeoutRunnable: Runnable? = null
+    private var wakeuper: VoiceWakeuper? = null
+    private var wakeSdkReady: Boolean = false
+    private var wakeListening: Boolean = false
+    private var wakeInitRequested: Boolean = false
+    private var wakeDiagStatus: String = "未启用"
+    private var wakeAuthEvent: String = "none"
+    private var wakeLastHitAtMs: Long = 0L
+    private var appInForeground: Boolean = false
     private var proxyAsrRecorder: AudioRecord? = null
     private var proxyAsrThread: Thread? = null
     private val proxyAsrWriteEnabled = AtomicBoolean(false)
@@ -176,8 +222,15 @@ class MainActivity : AppCompatActivity() {
     private var sparkTts: OnlineTTS? = null
     private var sparkTtsTrack: AudioTrack? = null
     private var sparkTtsPlaying: Boolean = false
+    private var isAssistantSpeaking: Boolean = false
+    private var lastNavAudioAtMs: Long = 0L
+    private var assistantSuppressedUntilMs: Long = 0L
+    private var pendingAssistantTtsText: String = ""
+    private var assistantResumeRunnable: Runnable? = null
     private var assistantTtsEnabled: Boolean = true
     private val assistantHistory = JSONArray()
+    @Volatile
+    private var authRedirecting: Boolean = false
 
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
 
@@ -188,6 +241,9 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_HOST = "backend_host"
         private const val KEY_PORT = "backend_port"
         private const val KEY_ASSISTANT_TTS_ENABLED = "assistant_tts_enabled"
+        private const val KEY_MOBILE_TOKEN = "mobile_token"
+        private const val KEY_MOBILE_EXPIRES_AT = "mobile_token_expires_at"
+        private const val KEY_MOBILE_USERNAME = "mobile_username"
         private const val DEFAULT_HOST = "10.0.2.2"
         private const val DEFAULT_PORT = "8088"
 
@@ -198,6 +254,7 @@ class MainActivity : AppCompatActivity() {
         private const val TAB_NAV = 0
         private const val TAB_MAP = 1
         private const val TAB_ASSISTANT = 2
+        private const val TAB_SETTINGS = 3
 
         private const val FRAME_SEND_INTERVAL_MS = 70L
         private const val CAMERA_JPEG_QUALITY = 35
@@ -208,6 +265,10 @@ class MainActivity : AppCompatActivity() {
 
         private const val VIEWER_STALE_TIMEOUT_MS = 2200L
         private const val VIEWER_RECONNECT_DELAY_MS = 1200L
+        private const val VIEWER_HEARTBEAT_INTERVAL_MS = 10_000L
+        private const val CORE_WS_RECONNECT_BASE_MS = 1200L
+        private const val CORE_WS_RECONNECT_MAX_MS = 8000L
+        private const val CORE_WS_RECONNECT_SUPPRESS_MS = 1800L
         private const val LOCATE_WINDOW_MS = 5000L
         private const val LOCATE_GOOD_ACCURACY_M = 30f
         private const val LOCATE_MAX_FALLBACK_ACCURACY_M = 80f
@@ -217,7 +278,19 @@ class MainActivity : AppCompatActivity() {
         private const val SPARK_ASR_RESULT_TIMEOUT_MS = 15000L
         private const val SPARK_ASR_RETRY_DELAY_MS = 700L
         private const val SPARK_ASR_MAX_RETRY = 1
+        private const val WAKE_HIT_COOLDOWN_MS = 2800L
+        private const val NAV_AUDIO_SUPPRESS_MS = 1800L
+        private const val ASSISTANT_RESUME_MIN_DELAY_MS = 250L
+        private const val RISK_EVENT_MAX_COUNT = 40
+        private const val RISK_EVENT_DEDUPE_WINDOW_MS = 3000L
     }
+
+    private data class RiskTimelineItem(
+        val type: String,
+        val timeLabel: String,
+        val guidance: String,
+        val tag: String
+    )
 
     private fun isUnsupportedMapAbi(): Boolean {
         val abis = Build.SUPPORTED_ABIS?.map { it.lowercase(Locale.US) } ?: emptyList()
@@ -237,6 +310,7 @@ class MainActivity : AppCompatActivity() {
             mapModuleReady = false
         }
         super.onCreate(savedInstanceState)
+        if (!ensureLoggedInOrRedirect()) return
         try {
             setContentView(R.layout.activity_main)
             bindViews()
@@ -244,6 +318,7 @@ class MainActivity : AppCompatActivity() {
             initNavPageActions()
             initMapPageActions()
             initAssistantPageActions()
+            initSettingsPageActions()
             ensureCameraPermissionAndStart()
             initAudioTrack()
             initSparkChain()
@@ -265,20 +340,27 @@ class MainActivity : AppCompatActivity() {
         etPort = findViewById(R.id.etPort)
         tvStatus = findViewById(R.id.tvStatus)
         tvGuidance = findViewById(R.id.tvGuidance)
+        tvJourneyDurationValue = findViewById(R.id.tvJourneyDurationValue)
+        llRiskTimeline = findViewById(R.id.llRiskTimeline)
+        tvRiskEmpty = findViewById(R.id.tvRiskEmpty)
 
         pageNav = findViewById(R.id.pageNav)
         pageMap = findViewById(R.id.pageMap)
         pageAssistant = findViewById(R.id.pageAssistant)
+        pageSettings = findViewById(R.id.pageSettings)
         btnTabNav = findViewById(R.id.btnTabNav)
         btnTabMap = findViewById(R.id.btnTabMap)
         btnTabAssistant = findViewById(R.id.btnTabAssistant)
+        btnTabSettings = findViewById(R.id.btnTabSettings)
+        btnLogout = findViewById(R.id.btnLogout)
         btnLocateMe = findViewById(R.id.btnLocateMe)
         etMapDestination = findViewById(R.id.etMapDestination)
         btnMapSearch = findViewById(R.id.btnMapSearch)
         btnMapMore = findViewById(R.id.btnMapMore)
+        btnToggleDebug = findViewById(R.id.btnToggleDebug)
+        debugControlsContainer = findViewById(R.id.debugControlsContainer)
         tvMapStatus = findViewById(R.id.tvMapStatus)
         tvMapCurrentLocationValue = findViewById(R.id.tvMapCurrentLocationValue)
-        tvMapNearestBlindValue = findViewById(R.id.tvMapNearestBlindValue)
         tvMapRouteSummary = findViewById(R.id.tvMapRouteSummary)
         mapCanvas = findViewById(R.id.mapCanvas)
         if (!mapModuleReady) {
@@ -298,12 +380,15 @@ class MainActivity : AppCompatActivity() {
         etPort.setText(prefs.getString(KEY_PORT, DEFAULT_PORT))
         assistantTtsEnabled = prefs.getBoolean(KEY_ASSISTANT_TTS_ENABLED, true)
         refreshAssistantTtsToggleUi()
+        wakeDiagStatus = "已暂时移除"
         updateVoiceDiagnostics(
             permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
             sparkSdkReady = sparkReady,
             sparkAsrActive = sparkAsrListening,
-            detail = "初始化完成，等待SDK启动"
+            detail = "初始化完成（App端语音唤醒已暂时移除）"
         )
+        refreshDebugControlsUi()
+        renderRiskTimeline()
     }
 
     private fun attachMapViewSafely() {
@@ -338,6 +423,7 @@ class MainActivity : AppCompatActivity() {
         btnTabNav.setOnClickListener { switchTab(TAB_NAV) }
         btnTabMap.setOnClickListener { switchTab(TAB_MAP) }
         btnTabAssistant.setOnClickListener { switchTab(TAB_ASSISTANT) }
+        btnTabSettings.setOnClickListener { switchTab(TAB_SETTINGS) }
         switchTab(TAB_NAV)
         setMapStatus("状态：等待定位...")
     }
@@ -347,6 +433,7 @@ class MainActivity : AppCompatActivity() {
         pageMap.visibility = if (tab == TAB_MAP) View.VISIBLE else View.GONE
         pageNav.visibility = if (tab == TAB_NAV) View.VISIBLE else View.GONE
         pageAssistant.visibility = if (tab == TAB_ASSISTANT) View.VISIBLE else View.GONE
+        pageSettings.visibility = if (tab == TAB_SETTINGS) View.VISIBLE else View.GONE
         if (tab == TAB_MAP) {
             attachMapViewSafely()
         }
@@ -358,43 +445,18 @@ class MainActivity : AppCompatActivity() {
         btnTabNav.backgroundTintList = if (tab == TAB_NAV) activeBg else inactiveBg
         btnTabMap.backgroundTintList = if (tab == TAB_MAP) activeBg else inactiveBg
         btnTabAssistant.backgroundTintList = if (tab == TAB_ASSISTANT) activeBg else inactiveBg
+        btnTabSettings.backgroundTintList = if (tab == TAB_SETTINGS) activeBg else inactiveBg
         btnTabNav.setTextColor(if (tab == TAB_NAV) activeText else inactiveText)
         btnTabMap.setTextColor(if (tab == TAB_MAP) activeText else inactiveText)
         btnTabAssistant.setTextColor(if (tab == TAB_ASSISTANT) activeText else inactiveText)
+        btnTabSettings.setTextColor(if (tab == TAB_SETTINGS) activeText else inactiveText)
     }
 
     private fun initNavPageActions() {
-        findViewById<Button>(R.id.btnConnect).setOnClickListener { connectSockets() }
-        findViewById<Button>(R.id.btnStart).setOnClickListener { callNavCommand("/api/nav/start") }
-        findViewById<Button>(R.id.btnStop).setOnClickListener { callNavCommand("/api/nav/stop") }
-        findViewById<Button>(R.id.btnTrafficTest).setOnClickListener {
-            callNavCommand("/api/traffic-test/start")
-        }
-        findViewById<Button>(R.id.btnComprehensiveTest).setOnClickListener {
-            callNavCommand("/api/nav/start?mode=blind_nav")
-        }
-        findViewById<Button>(R.id.btnAiReserved).setOnClickListener {
-            switchTab(TAB_ASSISTANT)
-        }
-        findViewById<Button>(R.id.btnMapReserved).setOnClickListener {
-            switchTab(TAB_MAP)
-        }
-        val btnDebug = findViewById<Button>(R.id.btnDebugOverlay)
-        btnDebug.setOnClickListener {
-            viewerEnabled = !viewerEnabled
-            btnDebug.text = if (viewerEnabled) "Server Overlay On" else "Server Overlay Off"
-            if (viewerEnabled) {
-                viewerHasFreshFrame = false
-                refreshVideoLayerMode()
-                if (wsViewer == null && currentWsBase.isNotBlank()) {
-                    connectViewerSocket(currentWsBase)
-                }
-                monitorViewerStall()
-            } else {
-                viewerHasFreshFrame = false
-                refreshVideoLayerMode()
-                viewerImage.setImageBitmap(null)
-            }
+        findViewById<Button>(R.id.btnConnect).setOnClickListener { startUserNavigation() }
+        findViewById<Button>(R.id.btnStop).setOnClickListener { stopUserNavigation() }
+        findViewById<Button>(R.id.btnSosPlaceholder).setOnClickListener {
+            Toast.makeText(this, "SOS 通道将在后续版本接入。", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -413,6 +475,9 @@ class MainActivity : AppCompatActivity() {
             refreshAssistantTtsToggleUi()
             if (!assistantTtsEnabled) {
                 stopSparkTtsPlayback()
+                assistantResumeRunnable?.let { mainHandler.removeCallbacks(it) }
+                assistantResumeRunnable = null
+                pendingAssistantTtsText = ""
             }
             val msg = if (assistantTtsEnabled) "已开启助手朗读" else "已关闭助手朗读"
             Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
@@ -422,6 +487,83 @@ class MainActivity : AppCompatActivity() {
             etAssistantInput.setSelection(etAssistantInput.text?.length ?: 0)
             Toast.makeText(this, "给家属发消息功能暂未启用。", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun initSettingsPageActions() {
+        btnToggleDebug.setOnClickListener {
+            debugControlsVisible = !debugControlsVisible
+            refreshDebugControlsUi()
+        }
+        findViewById<Button>(R.id.btnTrafficTest).setOnClickListener {
+            callNavCommand("/api/traffic-test/start")
+        }
+        findViewById<Button>(R.id.btnComprehensiveTest).setOnClickListener {
+            callNavCommand("/api/nav/start?mode=blind_nav")
+        }
+        val btnDebug = findViewById<Button>(R.id.btnDebugOverlay)
+        btnDebug.setOnClickListener {
+            viewerEnabled = !viewerEnabled
+            btnDebug.text = if (viewerEnabled) "Server Overlay On" else "Server Overlay Off"
+            if (viewerEnabled) {
+                viewerHasFreshFrame = false
+                refreshVideoLayerMode()
+                if (wsViewer == null && currentWsBase.isNotBlank()) {
+                    connectViewerSocket(currentWsBase)
+                }
+                monitorViewerStall()
+            } else {
+                wsViewer?.close(1000, "overlay_off")
+                wsViewer = null
+                wsViewerConnected = false
+                lastViewerHeartbeatAtMs = 0L
+                viewerHasFreshFrame = false
+                refreshVideoLayerMode()
+                viewerImage.setImageBitmap(null)
+            }
+        }
+        btnLogout.setOnClickListener { performLogout() }
+    }
+
+    private fun performLogout() {
+        if (logoutInProgress) return
+        logoutInProgress = true
+        btnLogout.isEnabled = false
+        btnLogout.text = getString(R.string.settings_logout_processing)
+        authRedirecting = true
+
+        val tokenSnapshot = currentMobileToken()
+        if (tokenSnapshot.isNotBlank()) {
+            Thread {
+                try {
+                    val payload = JSONObject()
+                    val req = Request.Builder()
+                        .url(currentBaseUrl() + "/api/mobile/auth/logout")
+                        .header("Authorization", "Bearer $tokenSnapshot")
+                        .header("X-Mobile-Token", tokenSnapshot)
+                        .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+                    httpClient.newCall(req).execute().use { _ -> }
+                } catch (e: Exception) {
+                    Log.w(TAG, "logout api failed: ${e.message}")
+                }
+            }.start()
+        }
+
+        try {
+            closeSockets()
+        } catch (_: Exception) {
+        }
+        prefs.edit()
+            .remove(KEY_MOBILE_TOKEN)
+            .remove(KEY_MOBILE_EXPIRES_AT)
+            .remove(KEY_MOBILE_USERNAME)
+            .apply()
+        Toast.makeText(this, "已退出登录", Toast.LENGTH_SHORT).show()
+        val intent = Intent(this, LoginActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        startActivity(intent)
+        finish()
     }
 
     private fun refreshAssistantTtsToggleUi() {
@@ -469,7 +611,7 @@ class MainActivity : AppCompatActivity() {
             if (granted) {
                 updateVoiceDiagnostics(
                     permissionOk = true,
-                    sparkSdkReady = true,
+                    sparkSdkReady = sparkReady,
                     sparkAsrActive = sparkAsrListening,
                     detail = "录音权限已授予"
                 )
@@ -481,7 +623,7 @@ class MainActivity : AppCompatActivity() {
                 pendingSpeechAfterPermission = false
                 updateVoiceDiagnostics(
                     permissionOk = false,
-                    sparkSdkReady = true,
+                    sparkSdkReady = sparkReady,
                     sparkAsrActive = false,
                     detail = "录音权限未开启"
                 )
@@ -490,12 +632,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun refreshDebugControlsUi() {
+        debugControlsContainer.visibility = if (debugControlsVisible) View.VISIBLE else View.GONE
+        btnToggleDebug.text = if (debugControlsVisible) "收起调试" else "调试"
+    }
+
     private fun startVoiceInput() {
         val permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (permissionOk) {
             updateVoiceDiagnostics(
                 permissionOk = true,
-                sparkSdkReady = true,
+                sparkSdkReady = sparkReady,
                 sparkAsrActive = sparkAsrListening,
                 detail = "开始语音识别（后端代理）"
             )
@@ -503,13 +650,62 @@ class MainActivity : AppCompatActivity() {
         } else {
             updateVoiceDiagnostics(
                 permissionOk = false,
-                sparkSdkReady = true,
+                sparkSdkReady = sparkReady,
                 sparkAsrActive = false,
                 detail = "请求录音权限"
             )
             pendingSpeechAfterPermission = true
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO_PERMISSION)
         }
+    }
+
+    private fun canPlayAssistantTtsNow(nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (currentTab != TAB_ASSISTANT) return false
+        if (!assistantTtsEnabled) return false
+        if (!sparkReady) return false
+        if (sparkAsrListening) return false
+        if (nowMs < assistantSuppressedUntilMs) return false
+        return (nowMs - lastNavAudioAtMs) >= NAV_AUDIO_SUPPRESS_MS
+    }
+
+    private fun assistantSuppressDetail(nowMs: Long = System.currentTimeMillis()): String {
+        return when {
+            sparkAsrListening -> "语音识别中，助手朗读已延后"
+            nowMs < assistantSuppressedUntilMs -> "导航播报中，助手朗读已延后"
+            else -> "助手朗读暂时不可用，已延后重试"
+        }
+    }
+
+    private fun schedulePendingAssistantTtsResume(trigger: String) {
+        val pending = pendingAssistantTtsText.trim()
+        if (pending.isEmpty()) return
+        assistantResumeRunnable?.let { mainHandler.removeCallbacks(it) }
+        val now = System.currentTimeMillis()
+        val delay = (assistantSuppressedUntilMs - now).coerceAtLeast(ASSISTANT_RESUME_MIN_DELAY_MS)
+        val runnable = Runnable {
+            assistantResumeRunnable = null
+            val text = pendingAssistantTtsText.trim()
+            if (text.isEmpty()) return@Runnable
+            if (currentTab != TAB_ASSISTANT || !assistantTtsEnabled || !sparkReady) {
+                pendingAssistantTtsText = ""
+                return@Runnable
+            }
+            if (sparkAsrListening || !canPlayAssistantTtsNow()) {
+                schedulePendingAssistantTtsResume(trigger = "blocked")
+                return@Runnable
+            }
+            pendingAssistantTtsText = ""
+            Log.i(TAG_VOICE, "ASST_RESUME trigger=$trigger")
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "导航播报结束，恢复助手朗读"
+            )
+            startAssistantTtsNow(text)
+        }
+        assistantResumeRunnable = runnable
+        mainHandler.postDelayed(runnable, delay)
     }
 
     private fun startProxyAsrRecognition(resetRetry: Boolean) {
@@ -536,7 +732,7 @@ class MainActivity : AppCompatActivity() {
         sparkAsrWriteEnabled.set(true)
 
         val wsBase = currentBaseUrl().replace("http://", "ws://").replace("https://", "wss://")
-        val req = Request.Builder().url("$wsBase/ws/asr_proxy").build()
+        val req = applyAuthHeaders(Request.Builder().url("$wsBase/ws/asr_proxy")).build()
         wsAsrProxy?.close(1000, "restart")
         wsAsrProxy = httpClient.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -606,6 +802,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (response?.code == 401) {
+                    onAuthExpired("WS asr_proxy")
+                    return
+                }
                 handleProxyAsrError(18804, t.message ?: "network_failure")
             }
 
@@ -710,6 +910,7 @@ class MainActivity : AppCompatActivity() {
         }
         wsAsrProxy?.close(1000, "stop")
         wsAsrProxy = null
+        schedulePendingAssistantTtsResume(trigger = "asr_stop")
     }
 
     private fun handleProxyAsrError(code: Int, msg: String) {
@@ -1028,6 +1229,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Throwable) {
             Log.w(TAG_VOICE, "sparkAsr stop failed", e)
         }
+        schedulePendingAssistantTtsResume(trigger = "spark_asr_stop")
     }
 
     private fun scheduleSparkAsrResultTimeout() {
@@ -1066,17 +1268,365 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val wakeInitListener = InitListener { code ->
+        runOnUiThread {
+            wakeAuthEvent = "AUTH:$code"
+            if (code == 0) {
+                wakeSdkReady = true
+                wakeDiagStatus = "初始化成功"
+                Log.i(TAG_VOICE, "WAKE_INIT_OK type=AUTH code=$code")
+                updateVoiceDiagnostics(
+                    permissionOk = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                    sparkSdkReady = sparkReady,
+                    sparkAsrActive = sparkAsrListening,
+                    detail = "MSC唤醒初始化成功"
+                )
+                resumeWakeListeningIfNeeded("wake_auth_ok")
+            } else {
+                wakeSdkReady = false
+                wakeDiagStatus = "初始化失败(code=$code)"
+                Log.e(TAG_VOICE, "WAKE_INIT_FAIL type=AUTH code=$code")
+                updateVoiceDiagnostics(
+                    permissionOk = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                    sparkSdkReady = sparkReady,
+                    sparkAsrActive = sparkAsrListening,
+                    detail = "MSC唤醒初始化失败，错误码=$code"
+                )
+            }
+        }
+    }
+
+    private val wakeuperListener = object : WakeuperListener {
+        override fun onResult(result: WakeuperResult?) {
+            val text = result?.resultString.orEmpty()
+            onWakeupHit("msc_wakeup", text)
+        }
+
+        override fun onError(error: SpeechError?) {
+            val code = error?.errorCode ?: -1
+            val desc = error?.getPlainDescription(true).orEmpty()
+            wakeDiagStatus = "识别异常(code=$code)"
+            wakeAuthEvent = "WAKE_ERR:$code"
+            Log.e(TAG_VOICE, "WAKE_ERROR code=$code msg=$desc")
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒识别异常：code=$code, msg=${if (desc.isBlank()) "unknown" else desc}"
+            )
+            wakeListening = false
+        }
+
+        override fun onBeginOfSpeech() {
+            // no-op
+        }
+
+        override fun onEvent(eventType: Int, isLast: Int, arg2: Int, obj: Bundle?) {
+            if (eventType == SpeechEvent.EVENT_RECORD_DATA) {
+                Log.i(TAG_VOICE, "WAKE_RECORD_DATA")
+            }
+        }
+
+        override fun onVolumeChanged(volume: Int) {
+            // no-op
+        }
+    }
+
+    private fun wakeAbilityId(): String {
+        return BuildConfig.IFLYTEK_WAKE_ABILITY_ID.trim().ifBlank { "e867a88f2" }
+    }
+
+    private fun wakeThreshold(): String {
+        return BuildConfig.IFLYTEK_WAKE_THRESHOLD.trim().ifBlank { "0 0:800" }
+    }
+
+    private fun wakeThresholdValue(): Int {
+        val raw = wakeThreshold()
+        val lastNum = Regex("(\\d+)").findAll(raw).lastOrNull()?.value?.toIntOrNull()
+        return (lastNum ?: 1450).coerceIn(0, 3000)
+    }
+
+    private fun wakeResourcePath(): String {
+        val appId = BuildConfig.IFLYTEK_APP_ID.trim()
+        return ResourceUtil.generateResourcePath(
+            this,
+            RESOURCE_TYPE.assets,
+            "ivw/$appId.jet"
+        )
+    }
+
+    private fun initWakeupEngine() {
+        if (!BuildConfig.IFLYTEK_WAKE_ENABLE) {
+            wakeDiagStatus = "未启用（IFLYTEK_WAKE_ENABLE=false）"
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒词未启用"
+            )
+            return
+        }
+        if (BuildConfig.IFLYTEK_APP_ID.isBlank()) {
+            wakeSdkReady = false
+            wakeDiagStatus = "未配置密钥"
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒词不可用：缺少 IFLYTEK_APP_ID"
+            )
+            return
+        }
+        if (!ensureWakeResourceFile()) {
+            wakeSdkReady = false
+            wakeDiagStatus = "资源缺失"
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒资源加载失败，请检查 assets/ivw/${BuildConfig.IFLYTEK_APP_ID}.jet"
+            )
+            return
+        }
+        try {
+            val param = "appid=${BuildConfig.IFLYTEK_APP_ID},${SpeechConstant.ENGINE_MODE}=${SpeechConstant.MODE_MSC}"
+            SpeechUtility.createUtility(applicationContext, param)
+            val ivw = VoiceWakeuper.createWakeuper(this, wakeInitListener)
+            wakeuper = ivw
+            wakeInitRequested = true
+            if (ivw != null) {
+                // 部分 MSC 版本不会触发 InitListener，createWakeuper 非空即视为可用。
+                wakeSdkReady = true
+                wakeDiagStatus = "初始化成功"
+                if (wakeAuthEvent == "none") wakeAuthEvent = "INIT:0"
+                updateVoiceDiagnostics(
+                    permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                    sparkSdkReady = sparkReady,
+                    sparkAsrActive = sparkAsrListening,
+                    detail = "MSC唤醒初始化成功"
+                )
+                resumeWakeListeningIfNeeded("wake_create_ok")
+            } else {
+                wakeDiagStatus = "初始化中"
+                updateVoiceDiagnostics(
+                    permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                    sparkSdkReady = sparkReady,
+                    sparkAsrActive = sparkAsrListening,
+                    detail = "MSC唤醒初始化中"
+                )
+                mainHandler.postDelayed({
+                    if (!wakeSdkReady && wakeDiagStatus == "初始化中") {
+                        wakeDiagStatus = "初始化超时"
+                        wakeAuthEvent = "INIT_TIMEOUT"
+                        updateVoiceDiagnostics(
+                            permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                            sparkSdkReady = sparkReady,
+                            sparkAsrActive = sparkAsrListening,
+                            detail = "MSC唤醒初始化超时，请重启应用重试"
+                        )
+                    }
+                }, 3000L)
+            }
+        } catch (e: Throwable) {
+            wakeSdkReady = false
+            wakeDiagStatus = "初始化异常(${e.javaClass.simpleName})"
+            Log.e(TAG_VOICE, "WAKE_INIT_FAIL setup exception", e)
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒SDK初始化异常：${e.javaClass.simpleName}"
+            )
+        }
+    }
+
+    private fun ensureWakeResourceFile(): Boolean {
+        return try {
+            val ivwDir = File(filesDir, "ivw")
+            if (!ivwDir.exists()) ivwDir.mkdirs()
+            val appId = BuildConfig.IFLYTEK_APP_ID.trim()
+            val outFile = File(ivwDir, "$appId.jet")
+            assets.open("ivw/$appId.jet").use { input ->
+                outFile.outputStream().use { out ->
+                    input.copyTo(out)
+                }
+            }
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG_VOICE, "copy wake resource failed", e)
+            false
+        }
+    }
+
+    private fun onWakeupHit(key: String, payload: String) {
+        val now = System.currentTimeMillis()
+        if (now - wakeLastHitAtMs < WAKE_HIT_COOLDOWN_MS) {
+            Log.i(TAG_VOICE, "WAKE_COOLDOWN key=$key")
+            wakeDiagStatus = "命中冷却中"
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒词命中但处于冷却窗口"
+            )
+            return
+        }
+        wakeLastHitAtMs = now
+        if (sparkAsrListening) {
+            Log.i(TAG_VOICE, "WAKE_BUSY asr_active=true")
+            wakeDiagStatus = "命中后等待识别空闲"
+            return
+        }
+        runOnUiThread {
+            Log.i(TAG_VOICE, "WAKE_HIT key=$key payload=${payload.take(80)}")
+            wakeDiagStatus = "命中成功"
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒词命中，开始语音识别"
+            )
+            stopWakeListening(reason = "wake_hit")
+            startVoiceInput()
+        }
+    }
+
+    private fun startWakeListening() {
+        if (!wakeSdkReady || wakeListening || !appInForeground) return
+        if (sparkAsrListening) return
+        val permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!permissionOk) {
+            wakeDiagStatus = "权限未开启"
+            updateVoiceDiagnostics(
+                permissionOk = false,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒监听未启动：录音权限未授予"
+            )
+            return
+        }
+        val mIvw = VoiceWakeuper.getWakeuper() ?: wakeuper
+        if (mIvw == null) {
+            wakeDiagStatus = "唤醒对象为空"
+            updateVoiceDiagnostics(
+                permissionOk = true,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒监听未启动：VoiceWakeuper 为空"
+            )
+            return
+        }
+        val appId = BuildConfig.IFLYTEK_APP_ID.trim()
+        val assetName = "ivw/$appId.jet"
+        val hasAsset = try {
+            assets.open(assetName).close()
+            true
+        } catch (_: Throwable) {
+            false
+        }
+        if (!hasAsset) {
+            wakeDiagStatus = "资源缺失"
+            updateVoiceDiagnostics(
+                permissionOk = true,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒监听未启动：找不到 $assetName"
+            )
+            return
+        }
+        try {
+            mIvw.setParameter(SpeechConstant.PARAMS, null)
+            mIvw.setParameter(SpeechConstant.IVW_THRESHOLD, "0:${wakeThresholdValue()}")
+            mIvw.setParameter(SpeechConstant.IVW_SST, "wakeup")
+            mIvw.setParameter(SpeechConstant.KEEP_ALIVE, "1")
+            mIvw.setParameter(SpeechConstant.IVW_NET_MODE, "0")
+            mIvw.setParameter(SpeechConstant.IVW_RES_PATH, wakeResourcePath())
+            mIvw.setParameter(SpeechConstant.IVW_AUDIO_PATH, "${getExternalFilesDir("msc")?.absolutePath ?: filesDir.absolutePath}/ivw.wav")
+            mIvw.setParameter(SpeechConstant.AUDIO_FORMAT, "wav")
+            val ret = mIvw.startListening(wakeuperListener)
+            if (ret != 0) {
+                wakeListening = false
+                wakeDiagStatus = "监听启动失败($ret)"
+                wakeAuthEvent = "START:$ret"
+                updateVoiceDiagnostics(
+                    permissionOk = true,
+                    sparkSdkReady = sparkReady,
+                    sparkAsrActive = sparkAsrListening,
+                    detail = "唤醒监听未启动：startListening=$ret"
+                )
+                return
+            }
+            wakeListening = true
+            wakeDiagStatus = "监听中"
+            wakeAuthEvent = "LISTENING"
+            Log.i(TAG_VOICE, "WAKE_START msc threshold=${wakeThresholdValue()}")
+            updateVoiceDiagnostics(
+                permissionOk = true,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒词监听中"
+            )
+        } catch (e: Throwable) {
+            wakeListening = false
+            wakeDiagStatus = "监听启动异常(${e.javaClass.simpleName})"
+            Log.e(TAG_VOICE, "WAKE_START failed", e)
+            updateVoiceDiagnostics(
+                permissionOk = permissionOk,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = "唤醒监听启动异常：${e.javaClass.simpleName}"
+            )
+        }
+    }
+
+    private fun stopWakeListening(reason: String) {
+        if (!wakeListening && wakeuper == null) return
+        wakeListening = false
+        try {
+            VoiceWakeuper.getWakeuper()?.stopListening()
+        } catch (_: Throwable) {
+        }
+        wakeDiagStatus = "已停止"
+        Log.i(TAG_VOICE, "WAKE_STOP reason=$reason")
+    }
+
+    private fun resumeWakeListeningIfNeeded(reason: String) {
+        if (!BuildConfig.IFLYTEK_WAKE_ENABLE) return
+        if (!appInForeground) return
+        if (!wakeInitRequested || !wakeSdkReady) return
+        if (sparkAsrListening) return
+        if (wakeListening) return
+        Log.i(TAG_VOICE, "WAKE_RESUME reason=$reason")
+        startWakeListening()
+    }
+
+    private fun releaseWakeupEngine() {
+        stopWakeListening(reason = "release")
+        if (wakeInitRequested) {
+            try {
+                VoiceWakeuper.getWakeuper()?.destroy()
+            } catch (e: Throwable) {
+                Log.w(TAG_VOICE, "wake destroy failed", e)
+            }
+        }
+        wakeInitRequested = false
+        wakeuper = null
+        wakeSdkReady = false
+    }
+
     private fun updateVoiceDiagnostics(
         permissionOk: Boolean,
         sparkSdkReady: Boolean,
         sparkAsrActive: Boolean,
         detail: String
     ) {
-        val status = "语音诊断：permission_ok=$permissionOk, spark_sdk_ready=$sparkSdkReady, spark_asr_active=$sparkAsrActive"
+        val status = "语音诊断：permission_ok=$permissionOk, spark_sdk_ready=$sparkSdkReady, spark_asr_active=$sparkAsrActive, wake_state=$wakeDiagStatus"
+        val runtimeConfig = "运行配置：app_id=${BuildConfig.IFLYTEK_APP_ID}, wake_removed=true"
+        val deviceInfo = "设备信息：abi=${Build.SUPPORTED_ABIS?.joinToString("|") ?: "unknown"}"
         runOnUiThread {
-            tvAssistantVoiceDiag.text = "$status\n详情：$detail"
+            tvAssistantVoiceDiag.text = "$status\n$runtimeConfig\n$deviceInfo\n详情：$detail"
         }
-        Log.i(TAG_VOICE, "$status | detail=$detail")
+        Log.i(TAG_VOICE, "$status | $runtimeConfig | $deviceInfo | detail=$detail")
     }
 
     private fun hasSparkCredentials(): Boolean {
@@ -1184,11 +1734,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun speakAssistantText(text: String) {
-        if (currentTab != TAB_ASSISTANT) return
-        if (!assistantTtsEnabled) return
-        if (!sparkReady) return
         val content = text.trim()
         if (content.isEmpty()) return
+        val now = System.currentTimeMillis()
+        if (!canPlayAssistantTtsNow(now)) {
+            pendingAssistantTtsText = content
+            val detail = assistantSuppressDetail(now)
+            Log.i(TAG_VOICE, "ASST_SUPPRESSED detail=$detail")
+            updateVoiceDiagnostics(
+                permissionOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                sparkSdkReady = sparkReady,
+                sparkAsrActive = sparkAsrListening,
+                detail = detail
+            )
+            schedulePendingAssistantTtsResume(trigger = "suppressed")
+            return
+        }
+        pendingAssistantTtsText = ""
+        startAssistantTtsNow(content)
+    }
+
+    private fun startAssistantTtsNow(content: String) {
         try {
             stopSparkTtsPlayback()
             val onlineTts = OnlineTTS("xiaoyan").apply {
@@ -1246,6 +1812,7 @@ class MainActivity : AppCompatActivity() {
             if (!sparkTtsPlaying) {
                 sparkTtsTrack?.play()
                 sparkTtsPlaying = true
+                isAssistantSpeaking = true
             }
             sparkTtsTrack?.write(audio, 0, audio.size)
         } catch (e: Throwable) {
@@ -1265,6 +1832,7 @@ class MainActivity : AppCompatActivity() {
         }
         sparkTtsTrack = null
         sparkTtsPlaying = false
+        isAssistantSpeaking = false
     }
 
     private fun releaseSparkChain() {
@@ -1447,11 +2015,90 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun startUserNavigation() {
+        if (navRunning) {
+            Toast.makeText(this, "导航已在运行中。", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val host = normalizedHostInput()
+        if (!ensureHostUsableForDevice(host)) return
+        etHost.setText(host)
+        pendingAutoStartNav = true
+        navSessionStartedAtMs = System.currentTimeMillis()
+        riskEvents.clear()
+        lastRiskGuidanceText = ""
+        lastRiskAddedAtMs = 0L
+        renderRiskTimeline()
+        clearGuidanceDisplay()
+        setUserStatusConnecting()
+        updateJourneySummary()
+        connectSockets()
+    }
+
+    private fun stopUserNavigation() {
+        pendingAutoStartNav = false
+        navRunning = false
+        if (isConnected) {
+            callNavCommand("/api/nav/stop")
+        }
+        clearGuidanceDisplay()
+        closeSockets()
+        lastNavAudioAtMs = 0L
+        assistantSuppressedUntilMs = 0L
+        schedulePendingAssistantTtsResume(trigger = "nav_stopped")
+        setUserStatusStopped()
+    }
+
+    private fun maybeAutoStartNav() {
+        if (!pendingAutoStartNav) return
+        if (!isConnected) return
+        pendingAutoStartNav = false
+        callNavCommand("/api/nav/start?mode=blind_nav")
+    }
+
+    private fun refreshCoreConnectionState() {
+        val ready = wsCameraConnected && wsGuidanceConnected && wsAudioConnected
+        isConnected = ready
+        if (ready) {
+            coreReconnectAttempt = 0
+            coreReconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+            coreReconnectRunnable = null
+            coreReconnectScheduled = false
+            runOnUiThread { maybeAutoStartNav() }
+        }
+    }
+
+    private fun scheduleCoreReconnect(reason: String) {
+        if (!pendingAutoStartNav) return
+        if (logoutInProgress || authRedirecting) return
+        if (coreReconnectScheduled) return
+        val now = System.currentTimeMillis()
+        if (now < suppressReconnectUntilMs) return
+
+        coreReconnectScheduled = true
+        val exp = if (coreReconnectAttempt >= 4) 4 else coreReconnectAttempt
+        val delay = (CORE_WS_RECONNECT_BASE_MS * (1L shl exp)).coerceAtMost(CORE_WS_RECONNECT_MAX_MS)
+        Log.w(TAG, "core ws reconnect scheduled in ${delay}ms reason=$reason attempt=$coreReconnectAttempt")
+        runOnUiThread { setUserStatusNetworkError("网络波动，${delay / 1000.0}秒后自动重连") }
+        val runnable = Runnable {
+            coreReconnectScheduled = false
+            coreReconnectRunnable = null
+            if (!pendingAutoStartNav || logoutInProgress || authRedirecting) return@Runnable
+            coreReconnectAttempt += 1
+            connectSockets()
+        }
+        coreReconnectRunnable = runnable
+        mainHandler.postDelayed(runnable, delay)
+    }
+
     private fun connectSockets() {
         saveEndpoint()
         closeSockets()
         isConnected = false
-        openCount = 0
+        wsCameraConnected = false
+        wsGuidanceConnected = false
+        wsAudioConnected = false
+        wsViewerConnected = false
         lastGuidanceLatencyMs = -1L
         lastGuidanceFrameId = 0L
         lastCameraQueueBytes = 0L
@@ -1462,30 +2109,56 @@ class MainActivity : AppCompatActivity() {
         currentWsBase = baseWs
 
         wsCamera = httpClient.newWebSocket(
-            Request.Builder().url("$baseWs/ws/camera").build(),
+            applyAuthHeaders(Request.Builder().url("$baseWs/ws/camera")).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    openCount += 1
-                    if (openCount >= 3) isConnected = true
-                    runOnUiThread { updateStatus("Camera WS connected ($openCount/4)") }
+                    wsCameraConnected = true
+                    refreshCoreConnectionState()
+                    runOnUiThread {
+                        setUserStatusConnecting()
+                    }
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    wsCameraConnected = false
+                    refreshCoreConnectionState()
+                    scheduleCoreReconnect("camera_closed:$code")
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (response?.code == 401) {
+                        onAuthExpired("WS camera")
+                        return
+                    }
                     Log.e(TAG, "camera ws failed", t)
-                    isConnected = false
-                    runOnUiThread { updateStatus("Camera WS failed: ${t.message}") }
+                    wsCameraConnected = false
+                    refreshCoreConnectionState()
+                    navRunning = false
+                    runOnUiThread {
+                        clearGuidanceDisplay()
+                        setUserStatusNetworkError("相机连接失败")
+                    }
+                    scheduleCoreReconnect("camera_failure")
                 }
             }
         )
 
         wsGuidance = httpClient.newWebSocket(
-            Request.Builder().url("$baseWs/ws/guidance").build(),
+            applyAuthHeaders(Request.Builder().url("$baseWs/ws/guidance")).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    openCount += 1
-                    if (openCount >= 3) isConnected = true
-                    runOnUiThread { updateStatus("Guidance WS connected ($openCount/4)") }
+                    wsGuidanceConnected = true
+                    refreshCoreConnectionState()
+                    runOnUiThread {
+                        setUserStatusConnecting()
+                    }
                     webSocket.send("hello")
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    wsGuidanceConnected = false
+                    refreshCoreConnectionState()
+                    scheduleCoreReconnect("guidance_closed:$code")
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -1496,6 +2169,7 @@ class MainActivity : AppCompatActivity() {
                         val traffic = obj.optString("traffic_light", "unknown")
                         val frameId = obj.optLong("frame_id", 0L)
                         val tsSec = obj.optDouble("timestamp", 0.0)
+                        val eventTimeMs = if (tsSec > 0.0) (tsSec * 1000.0).toLong() else System.currentTimeMillis()
                         if (tsSec > 0.0) {
                             val latency = System.currentTimeMillis() - (tsSec * 1000.0).toLong()
                             lastGuidanceLatencyMs = latency.coerceAtLeast(0L)
@@ -1507,13 +2181,14 @@ class MainActivity : AppCompatActivity() {
                             lastGuidanceText = guidance
                         }
                         runOnUiThread {
-                            tvGuidance.text = "Guidance: $lastGuidanceText"
-                            val qKb = lastCameraQueueBytes / 1024L
-                            val latencyText = if (lastGuidanceLatencyMs >= 0L) "${lastGuidanceLatencyMs}ms" else "-"
-                            updateStatus(
-                                "State=$state traffic=$traffic latency=$latencyText frame=$lastGuidanceFrameId " +
-                                    "upQ=${qKb}KB sent=$sentFrames drop=$droppedByQueue"
-                            )
+                            tvGuidance.text = if (lastGuidanceText.isBlank()) getString(R.string.nav_guidance_idle) else "播报：$lastGuidanceText"
+                            appendRiskTimelineIfNeeded(guidance, traffic, state, eventTimeMs)
+                            if (state == "BLIND_NAV" || state == "TRAFFIC_TEST") {
+                                navRunning = true
+                                setUserStatusRunning(traffic)
+                            } else if (state == "IDLE") {
+                                navRunning = false
+                            }
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "guidance json parse failed", e)
@@ -1521,49 +2196,93 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (response?.code == 401) {
+                        onAuthExpired("WS guidance")
+                        return
+                    }
                     Log.e(TAG, "guidance ws failed", t)
-                    isConnected = false
-                    runOnUiThread { updateStatus("Guidance WS failed: ${t.message}") }
+                    wsGuidanceConnected = false
+                    refreshCoreConnectionState()
+                    navRunning = false
+                    runOnUiThread {
+                        clearGuidanceDisplay()
+                        setUserStatusNetworkError("引导连接失败")
+                    }
+                    scheduleCoreReconnect("guidance_failure")
                 }
             }
         )
 
         wsAudio = httpClient.newWebSocket(
-            Request.Builder().url("$baseWs/ws/audio").build(),
+            applyAuthHeaders(Request.Builder().url("$baseWs/ws/audio")).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    openCount += 1
-                    if (openCount >= 3) isConnected = true
-                    runOnUiThread { updateStatus("Audio WS connected ($openCount/4)") }
+                    wsAudioConnected = true
+                    refreshCoreConnectionState()
+                    runOnUiThread {
+                        setUserStatusConnecting()
+                    }
                     webSocket.send("hello")
                 }
 
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    wsAudioConnected = false
+                    refreshCoreConnectionState()
+                    scheduleCoreReconnect("audio_closed:$code")
+                }
+
                 override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                    val now = System.currentTimeMillis()
+                    lastNavAudioAtMs = now
+                    assistantSuppressedUntilMs = now + NAV_AUDIO_SUPPRESS_MS
+                    if (isAssistantSpeaking) {
+                        Log.i(TAG_VOICE, "NAV_PREEMPT assistant_tts")
+                        stopSparkTtsPlayback()
+                        updateVoiceDiagnostics(
+                            permissionOk = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                            sparkSdkReady = sparkReady,
+                            sparkAsrActive = sparkAsrListening,
+                            detail = "导航播报中，助手朗读已延后"
+                        )
+                    }
                     audioTrack?.write(bytes.toByteArray(), 0, bytes.size)
+                    schedulePendingAssistantTtsResume(trigger = "nav_audio")
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (response?.code == 401) {
+                        onAuthExpired("WS audio")
+                        return
+                    }
                     Log.e(TAG, "audio ws failed", t)
-                    runOnUiThread { updateStatus("Audio WS failed: ${t.message}") }
+                    wsAudioConnected = false
+                    refreshCoreConnectionState()
+                    navRunning = false
+                    runOnUiThread { setUserStatusNetworkError("音频连接失败") }
+                    scheduleCoreReconnect("audio_failure")
                 }
             }
         )
 
-        connectViewerSocket(baseWs)
-        monitorViewerStall()
-        updateStatus("Sockets connecting")
+        if (viewerEnabled) {
+            connectViewerSocket(baseWs)
+            monitorViewerStall()
+        }
+        setUserStatusConnecting()
     }
 
     private fun connectViewerSocket(baseWs: String) {
         wsViewer?.close(1000, "reconnect")
         wsViewer = httpClient.newWebSocket(
-            Request.Builder().url("$baseWs/ws/viewer").build(),
+            applyAuthHeaders(Request.Builder().url("$baseWs/ws/viewer")).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    openCount += 1
-                    if (openCount >= 3) isConnected = true
+                    wsViewerConnected = true
                     viewerReconnectScheduled = false
-                    runOnUiThread { updateStatus("Viewer WS connected ($openCount/4)") }
+                    lastViewerHeartbeatAtMs = System.currentTimeMillis()
+                    runOnUiThread {
+                        setUserStatusConnecting()
+                    }
                     webSocket.send("hello")
                 }
 
@@ -1594,13 +2313,20 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     wsViewer = null
+                    wsViewerConnected = false
                     scheduleViewerReconnect()
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (response?.code == 401) {
+                        onAuthExpired("WS viewer")
+                        return
+                    }
                     Log.e(TAG, "viewer ws failed", t)
                     wsViewer = null
-                    runOnUiThread { updateStatus("Viewer WS failed: ${t.message}") }
+                    wsViewerConnected = false
+                    navRunning = false
+                    runOnUiThread { setUserStatusNetworkError("预览连接失败") }
                     scheduleViewerReconnect()
                 }
             }
@@ -1626,10 +2352,17 @@ class MainActivity : AppCompatActivity() {
                 if (!viewerMonitorStarted) return
                 if (viewerEnabled) {
                     val now = System.currentTimeMillis()
+                    if (wsViewerConnected && now - lastViewerHeartbeatAtMs >= VIEWER_HEARTBEAT_INTERVAL_MS) {
+                        try {
+                            if (wsViewer?.send("ping") == true) {
+                                lastViewerHeartbeatAtMs = now
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
                     if (lastViewerFrameAtMs > 0L && (now - lastViewerFrameAtMs) > VIEWER_STALE_TIMEOUT_MS) {
                         viewerHasFreshFrame = false
                         runOnUiThread { refreshVideoLayerMode() }
-                        if (currentWsBase.isNotBlank()) connectViewerSocket(currentWsBase)
                     }
                 }
                 mainHandler.postDelayed(this, 800L)
@@ -1777,7 +2510,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (!isConnected) {
-            setMapStatus("状态：未连接后端，请先在导航页点击 Connect")
+            setMapStatus("状态：未连接后端，请先在导航页点击一键开始导航")
             return
         }
 
@@ -1934,20 +2667,20 @@ class MainActivity : AppCompatActivity() {
             val places = json.optJSONArray("places") ?: JSONArray()
             if (places.length() == 0) {
                 tvMapRouteSummary.text = "路线摘要：附近未找到$query"
-                tvMapNearestBlindValue.text = "未知"
                 setMapStatus("状态：附近搜索完成")
                 return@getJson
             }
             val lines = mutableListOf<String>()
-            var nearestDistanceText = "未知"
             for (i in 0 until minOf(3, places.length())) {
                 val p = places.optJSONObject(i) ?: continue
                 val name = p.optString("name", "未知地点")
                 val distanceText = distanceFieldToText(p.opt("distance"))
-                if (i == 0) nearestDistanceText = distanceText
-                lines.add("${i + 1}. $name（$distanceText）")
+                if (distanceText == "未知") {
+                    lines.add("${i + 1}. $name")
+                } else {
+                    lines.add("${i + 1}. $name（$distanceText）")
+                }
             }
-            tvMapNearestBlindValue.text = nearestDistanceText
             tvMapRouteSummary.text = "路线摘要：附近$query\n" + lines.joinToString("\n")
             setMapStatus("状态：附近搜索完成")
         }
@@ -1956,10 +2689,53 @@ class MainActivity : AppCompatActivity() {
     private fun ensureMapReady(): Boolean {
         saveEndpoint()
         if (!isConnected) {
-            setMapStatus("状态：未连接后端，请先在导航页点击 Connect")
+            setMapStatus("状态：未连接后端，请先在导航页点击一键开始导航")
             return false
         }
         return true
+    }
+
+    private fun currentMobileToken(): String {
+        return prefs.getString(KEY_MOBILE_TOKEN, "").orEmpty().trim()
+    }
+
+    private fun ensureLoggedInOrRedirect(): Boolean {
+        if (currentMobileToken().isNotBlank()) return true
+        val intent = Intent(this, LoginActivity::class.java)
+        startActivity(intent)
+        finish()
+        return false
+    }
+
+    private fun applyAuthHeaders(builder: Request.Builder): Request.Builder {
+        val token = currentMobileToken()
+        if (token.isNotBlank()) {
+            builder.header("Authorization", "Bearer $token")
+            builder.header("X-Mobile-Token", token)
+        }
+        return builder
+    }
+
+    private fun onAuthExpired(source: String) {
+        if (authRedirecting) return
+        authRedirecting = true
+        runOnUiThread {
+            try {
+                closeSockets()
+            } catch (_: Exception) {
+            }
+            prefs.edit()
+                .remove(KEY_MOBILE_TOKEN)
+                .remove(KEY_MOBILE_EXPIRES_AT)
+                .remove(KEY_MOBILE_USERNAME)
+                .apply()
+            Toast.makeText(this, "登录已过期，请重新登录（$source）", Toast.LENGTH_LONG).show()
+            val intent = Intent(this, LoginActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            startActivity(intent)
+            finish()
+        }
     }
 
     private fun hasLocationPermission(): Boolean {
@@ -1989,10 +2765,19 @@ class MainActivity : AppCompatActivity() {
         val base = currentBaseUrl()
         Thread {
             try {
-                val req = Request.Builder().url(base + path).post(payload.toString().toRequestBody("application/json".toMediaType())).build()
+                val req = applyAuthHeaders(
+                    Request.Builder()
+                        .url(base + path)
+                        .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                ).build()
                 httpClient.newCall(req).execute().use { resp ->
                     val body = resp.body?.string().orEmpty()
                     val json = parseJson(body)
+                    if (resp.code == 401) {
+                        onAuthExpired("HTTP $path")
+                        runOnUiThread { callback(json, "登录已过期，请重新登录") }
+                        return@use
+                    }
                     if (!resp.isSuccessful) {
                         val msg = jsonErrorText(json, fallback = "HTTP ${resp.code}")
                         runOnUiThread { callback(json, msg) }
@@ -2017,10 +2802,15 @@ class MainActivity : AppCompatActivity() {
             try {
                 val uriBuilder = Uri.parse(base + path).buildUpon()
                 for ((k, v) in query) uriBuilder.appendQueryParameter(k, v)
-                val req = Request.Builder().url(uriBuilder.build().toString()).get().build()
+                val req = applyAuthHeaders(Request.Builder().url(uriBuilder.build().toString()).get()).build()
                 httpClient.newCall(req).execute().use { resp ->
                     val body = resp.body?.string().orEmpty()
                     val json = parseJson(body)
+                    if (resp.code == 401) {
+                        onAuthExpired("GET $path")
+                        runOnUiThread { callback(json, "登录已过期，请重新登录") }
+                        return@use
+                    }
                     if (!resp.isSuccessful) {
                         val msg = jsonErrorText(json, fallback = "HTTP ${resp.code}")
                         runOnUiThread { callback(json, msg) }
@@ -2093,7 +2883,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun callNavCommand(path: String) {
         if (!isConnected) {
-            Toast.makeText(this, "Please connect first.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "请先连接后端。", Toast.LENGTH_SHORT).show()
             return
         }
         saveEndpoint()
@@ -2103,19 +2893,37 @@ class MainActivity : AppCompatActivity() {
                 val req = Request.Builder()
                     .url(baseHttp + path)
                     .post("{}".toRequestBody("application/json".toMediaType()))
-                    .build()
-                httpClient.newCall(req).execute().use { resp ->
+                val authedReq = applyAuthHeaders(req).build()
+                httpClient.newCall(authedReq).execute().use { resp ->
                     val ok = resp.isSuccessful
                     val body = resp.body?.string().orEmpty()
+                    if (resp.code == 401) {
+                        onAuthExpired("NAV $path")
+                        return@use
+                    }
                     if (!ok) throw IllegalStateException("HTTP ${resp.code}: $body")
                     val obj = JSONObject(body)
                     isNavEnabled = obj.optBoolean("nav_enabled", false)
-                    runOnUiThread { updateStatus("Nav command ok: ${obj.optString("state")}") }
+                    val state = obj.optString("state")
+                    runOnUiThread {
+                        if (path.contains("/stop")) {
+                            navRunning = false
+                            clearGuidanceDisplay()
+                            setUserStatusStopped()
+                        } else if (state.equals("BLIND_NAV", ignoreCase = true) || state.equals("TRAFFIC_TEST", ignoreCase = true)) {
+                            navRunning = true
+                            setUserStatusRunning()
+                        } else {
+                            setUserStatusConnecting()
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "nav command failed", e)
                 runOnUiThread {
-                    Toast.makeText(this, "Nav command failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    navRunning = false
+                    setUserStatusNetworkError("导航命令失败")
+                    Toast.makeText(this, "导航命令失败：${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }.start()
@@ -2139,11 +2947,154 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateStatus(text: String) {
-        tvStatus.text = "Status: $text"
+        tvStatus.text = "状态：$text"
+    }
+
+    private fun setUserStatusConnecting() {
+        updateStatus("连接中…")
+    }
+
+    private fun setUserStatusRunning(traffic: String = "unknown") {
+        val trafficLabel = when (traffic.lowercase(Locale.US)) {
+            "red" -> "红灯"
+            "green" -> "绿灯"
+            else -> "未知"
+        }
+        updateStatus("导航中（灯态：$trafficLabel）")
+        updateJourneySummary()
+    }
+
+    private fun setUserStatusStopped() {
+        updateStatus("未连接")
+        updateJourneySummary()
+    }
+
+    private fun setUserStatusNetworkError(reason: String) {
+        updateStatus("网络异常：$reason")
+    }
+
+    private fun clearGuidanceDisplay() {
+        lastGuidanceText = ""
+        tvGuidance.text = getString(R.string.nav_guidance_idle)
+    }
+
+    private fun appendRiskTimelineIfNeeded(guidance: String, traffic: String, state: String, eventTimeMs: Long) {
+        if (state.equals("IDLE", ignoreCase = true)) return
+        val message = guidance.trim()
+        if (message.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        if (message == lastRiskGuidanceText && now - lastRiskAddedAtMs < RISK_EVENT_DEDUPE_WINDOW_MS) return
+        lastRiskGuidanceText = message
+        lastRiskAddedAtMs = now
+
+        val item = RiskTimelineItem(
+            type = classifyRiskType(message, traffic),
+            timeLabel = riskTimeFormatter.format(Date(eventTimeMs)),
+            guidance = message,
+            tag = "语音已播报"
+        )
+        if (riskEvents.size >= RISK_EVENT_MAX_COUNT) {
+            riskEvents.removeFirst()
+        }
+        riskEvents.addLast(item)
+        renderRiskTimeline()
+    }
+
+    private fun classifyRiskType(guidance: String, traffic: String): String {
+        val normalized = guidance.lowercase(Locale.CHINA)
+        if (traffic.equals("red", ignoreCase = true) || traffic.equals("green", ignoreCase = true)
+            || normalized.contains("红灯") || normalized.contains("绿灯")
+        ) {
+            return "红绿灯识别"
+        }
+        if (normalized.contains("电动车") || normalized.contains("车辆") || normalized.contains("机动车") || normalized.contains("汽车")) {
+            return "车辆接近"
+        }
+        if (normalized.contains("障碍") || normalized.contains("施工") || normalized.contains("围栏") || normalized.contains("台阶")) {
+            return "障碍物检测"
+        }
+        return "通用提醒"
+    }
+
+    private fun renderRiskTimeline() {
+        llRiskTimeline.removeAllViews()
+        if (riskEvents.isEmpty()) {
+            tvRiskEmpty.visibility = View.VISIBLE
+            updateJourneySummary()
+            return
+        }
+        tvRiskEmpty.visibility = View.GONE
+        for (item in riskEvents.reversed()) {
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = 8 }
+                setPadding(18, 14, 18, 14)
+                background = GradientDrawable().apply {
+                    cornerRadius = 18f
+                    setColor(0xFFFFFFFF.toInt())
+                }
+            }
+            val titleRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            titleRow.addView(TextView(this).apply {
+                text = item.type
+                setTextColor(0xFF0F172A.toInt())
+                textSize = 15f
+            })
+            titleRow.addView(TextView(this).apply {
+                text = item.timeLabel
+                setTextColor(0xFF64748B.toInt())
+                textSize = 12f
+                gravity = Gravity.END
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            })
+            card.addView(titleRow)
+            card.addView(TextView(this).apply {
+                text = item.guidance
+                setTextColor(0xFF334155.toInt())
+                textSize = 14f
+                setPadding(0, 8, 0, 8)
+            })
+            card.addView(TextView(this).apply {
+                text = item.tag
+                setTextColor(0xFF0B63F6.toInt())
+                textSize = 12f
+                background = GradientDrawable().apply {
+                    cornerRadius = 10f
+                    setColor(0x1A0B63F6)
+                }
+                setPadding(10, 4, 10, 4)
+            })
+            llRiskTimeline.addView(card)
+        }
+        updateJourneySummary()
+    }
+
+    private fun updateJourneySummary() {
+        val elapsedMin = if (navSessionStartedAtMs > 0L) {
+            ((System.currentTimeMillis() - navSessionStartedAtMs) / 60000L).coerceAtLeast(0L)
+        } else {
+            0L
+        }
+        tvJourneyDurationValue.text = elapsedMin.toString()
     }
 
     private fun currentBaseUrl(): String {
-        val hostRaw = etHost.text?.toString()?.trim().orEmpty()
+        val hostRaw = normalizedHostInput()
         val portRaw = etPort.text?.toString()?.trim().orEmpty()
         val host = if (hostRaw.isEmpty()) DEFAULT_HOST else hostRaw
         val port = if (portRaw.matches(Regex("\\d+"))) portRaw else DEFAULT_PORT
@@ -2152,12 +3103,53 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveEndpoint() {
-        val host = etHost.text?.toString()?.trim().orEmpty().ifEmpty { DEFAULT_HOST }
+        val host = normalizedHostInput().ifEmpty { DEFAULT_HOST }
         val port = etPort.text?.toString()?.trim().orEmpty().ifEmpty { DEFAULT_PORT }
         prefs.edit().putString(KEY_HOST, host).putString(KEY_PORT, port).apply()
     }
 
+    private fun normalizedHostInput(): String {
+        return etHost.text?.toString().orEmpty()
+            .replace("。", ".")
+            .replace("．", ".")
+            .replace("：", ":")
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .trimEnd('/')
+            .trim()
+    }
+
+    private fun ensureHostUsableForDevice(host: String): Boolean {
+        if (host != "10.0.2.2") return true
+        if (isProbablyEmulator()) return true
+        val msg = "真机不能使用 10.0.2.2，请改为电脑局域网IP（如 192.168.x.x）"
+        setUserStatusNetworkError(msg)
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+        return false
+    }
+
+    private fun isProbablyEmulator(): Boolean {
+        val fp = Build.FINGERPRINT.lowercase(Locale.US)
+        val model = Build.MODEL.lowercase(Locale.US)
+        val manu = Build.MANUFACTURER.lowercase(Locale.US)
+        val brand = Build.BRAND.lowercase(Locale.US)
+        val device = Build.DEVICE.lowercase(Locale.US)
+        val product = Build.PRODUCT.lowercase(Locale.US)
+        return fp.contains("generic")
+            || fp.contains("emulator")
+            || model.contains("emulator")
+            || model.contains("android sdk built for")
+            || manu.contains("genymotion")
+            || (brand.contains("generic") && device.contains("generic"))
+            || product.contains("sdk_gphone")
+            || product.contains("emulator")
+    }
+
     private fun closeSockets() {
+        suppressReconnectUntilMs = System.currentTimeMillis() + CORE_WS_RECONNECT_SUPPRESS_MS
+        coreReconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        coreReconnectRunnable = null
+        coreReconnectScheduled = false
         wsCamera?.close(1000, "reconnect")
         wsGuidance?.close(1000, "reconnect")
         wsAudio?.close(1000, "reconnect")
@@ -2168,9 +3160,17 @@ class MainActivity : AppCompatActivity() {
         wsAudio = null
         wsViewer = null
         wsAsrProxy = null
+        wsCameraConnected = false
+        wsGuidanceConnected = false
+        wsAudioConnected = false
+        wsViewerConnected = false
+        refreshCoreConnectionState()
+        navRunning = false
+        lastNavAudioAtMs = 0L
     }
 
     override fun onDestroy() {
+        appInForeground = false
         stopContinuousLocation()
         stopProxyAsrRecognition(sendStop = true)
         releaseSparkChain()
@@ -2186,6 +3186,8 @@ class MainActivity : AppCompatActivity() {
         isNavEnabled = false
         isConnected = false
         viewerMonitorStarted = false
+        assistantResumeRunnable?.let { mainHandler.removeCallbacks(it) }
+        assistantResumeRunnable = null
         mainHandler.removeCallbacksAndMessages(null)
         closeSockets()
         audioTrack?.stop()
@@ -2195,6 +3197,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        appInForeground = true
         try {
             baiduMapView?.onResume()
         } catch (e: Throwable) {
@@ -2203,9 +3206,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        appInForeground = false
         stopProxyAsrRecognition(sendStop = true)
         stopSparkAsr(true)
         stopSparkTtsPlayback()
+        assistantResumeRunnable?.let { mainHandler.removeCallbacks(it) }
+        assistantResumeRunnable = null
+        pendingAssistantTtsText = ""
         try {
             baiduMapView?.onPause()
         } catch (e: Throwable) {

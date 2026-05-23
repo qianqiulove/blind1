@@ -20,6 +20,9 @@ fun asQuoted(value: String): String {
 val iflytekAppId = (localProps.getProperty("IFLYTEK_APP_ID") ?: "").trim()
 val iflytekApiKey = (localProps.getProperty("IFLYTEK_API_KEY") ?: "").trim()
 val iflytekApiSecret = (localProps.getProperty("IFLYTEK_API_SECRET") ?: "").trim()
+val iflytekWakeAbilityId = (localProps.getProperty("IFLYTEK_WAKE_ABILITY_ID") ?: "e867a88f2").trim()
+val iflytekWakeEnabled = (localProps.getProperty("IFLYTEK_WAKE_ENABLE") ?: "false").trim().equals("true", ignoreCase = true)
+val iflytekWakeThreshold = (localProps.getProperty("IFLYTEK_WAKE_THRESHOLD") ?: "0 0:800").trim()
 
 android {
     namespace = "com.blind.v1"
@@ -35,6 +38,9 @@ android {
         buildConfigField("String", "IFLYTEK_APP_ID", asQuoted(iflytekAppId))
         buildConfigField("String", "IFLYTEK_API_KEY", asQuoted(iflytekApiKey))
         buildConfigField("String", "IFLYTEK_API_SECRET", asQuoted(iflytekApiSecret))
+        buildConfigField("String", "IFLYTEK_WAKE_ABILITY_ID", asQuoted(iflytekWakeAbilityId))
+        buildConfigField("boolean", "IFLYTEK_WAKE_ENABLE", if (iflytekWakeEnabled) "true" else "false")
+        buildConfigField("String", "IFLYTEK_WAKE_THRESHOLD", asQuoted(iflytekWakeThreshold))
     }
     buildFeatures {
         buildConfig = true
@@ -74,5 +80,6 @@ dependencies {
     implementation("com.baidu.lbsyun:BaiduMapSDK_Map:7.6.4")
     implementation(files("libs/SparkChain.aar"))
     implementation(files("libs/Codec.aar"))
+    implementation(files("libs/Msc.jar"))
     implementation("com.google.code.gson:gson:2.8.8")
 }

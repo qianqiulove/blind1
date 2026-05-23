@@ -45,7 +45,7 @@ class RuntimeConfig:
     device: str = os.getenv("BLIND_DEVICE", "cuda:0")
     blind_model: Path = Path(os.getenv("BLIND_PATH_MODEL", str(MODELS_DIR / "yolo-seg.pt")))
     traffic_model: Path = Path(os.getenv("BLIND_TRAFFIC_MODEL", str(MODELS_DIR / "best.pt")))
-    ws_idle_timeout_sec: float = float(os.getenv("BLIND_WS_IDLE_TIMEOUT_SEC", "60"))
+    ws_idle_timeout_sec: float = float(os.getenv("BLIND_WS_IDLE_TIMEOUT_SEC", "120"))
     guidance_interval_sec: float = float(os.getenv("BLIND_GUIDANCE_INTERVAL_SEC", "1.0"))
     baidu_map_ak: str = os.getenv("BAIDU_MAP_AK", "")
     baidu_map_timeout_sec: float = float(os.getenv("BAIDU_MAP_TIMEOUT_SEC", "8.0"))
@@ -67,6 +67,20 @@ class RuntimeConfig:
     xfyun_asr_accent: str = os.getenv("XFYUN_ASR_ACCENT", "mandarin")
     xfyun_asr_dwa: str = os.getenv("XFYUN_ASR_DWA", "wpgs")
     xfyun_asr_vad_eos: int = int(os.getenv("XFYUN_ASR_VAD_EOS", "5000"))
+    secret_key: str = os.getenv("SECRET_KEY", "blind-dev-secret-change-me")
+    mysql_host: str = os.getenv("MYSQL_HOST", "127.0.0.1")
+    mysql_port: int = int(os.getenv("MYSQL_PORT", "3306"))
+    mysql_user: str = os.getenv("MYSQL_USER", "root")
+    mysql_password: str = os.getenv("MYSQL_PASSWORD", "")
+    mysql_database: str = os.getenv("MYSQL_DATABASE", "blind")
+    token_expire_hours: int = int(os.getenv("TOKEN_EXPIRE_HOURS", "24"))
+    smtp_host: str = os.getenv("SMTP_HOST", "")
+    smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user: str = os.getenv("SMTP_USER", "")
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+    smtp_use_tls: bool = os.getenv("SMTP_USE_TLS", "true").strip().lower() in {"1", "true", "yes", "y"}
+    smtp_use_ssl: bool = os.getenv("SMTP_USE_SSL", "false").strip().lower() in {"1", "true", "yes", "y"}
+    mail_from: str = os.getenv("MAIL_FROM", "")
 
 
 def build_config() -> RuntimeConfig:

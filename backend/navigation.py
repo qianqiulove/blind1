@@ -29,9 +29,9 @@ class NavigationOrchestrator:
     - traffic_test mode: only output traffic light guidance.
     - blind_nav mode:
       - red light has highest priority (safety first)
+      - green light can override "path-lost" blind hints to avoid wrong user experience
       - otherwise keep blind guidance text
-      - green light can be a fallback when blind text is empty
-    - idle: still allow traffic guidance output when recognized, for easier testing.
+    - idle: no guidance output (user mode, avoid accidental red/green broadcast).
     """
 
     def __init__(self, guidance_interval_sec: float = 1.0) -> None:
@@ -47,6 +47,13 @@ class NavigationOrchestrator:
         self.red_streak = 0
         self.green_streak = 0
         self.stable_frames = 2
+        self._path_lost_keywords = (
+            "丢失路径",
+            "重新搜索",
+            "没看到盲道",
+            "未检测到盲道",
+            "盲道中断",
+        )
 
     @property
     def is_traffic_test_mode(self) -> bool:
@@ -71,15 +78,13 @@ class NavigationOrchestrator:
         self.green_streak = 0
 
     def process(self, blind: BlindInference, traffic: TrafficInference) -> NavOutput:
-        # Update traffic streaks in all modes so idle/test can also produce text.
+        # Update traffic streaks in all modes for state tracking/debug visibility.
         self._update_traffic_streaks(traffic.light)
 
         if not self.nav_enabled:
-            # In IDLE we still expose traffic text when stable to support direct module testing.
-            idle_text = self._traffic_guidance_text(green_when_no_blind=True, blind_has_text=False)
             return NavOutput(
                 state=STATE_IDLE,
-                guidance_text=self._rate_limit(idle_text),
+                guidance_text="",
                 traffic_light=traffic.light,
                 blind_detected=False,
             )
@@ -93,9 +98,18 @@ class NavigationOrchestrator:
                 blind_detected=False,
             )
 
-        # blind_nav mode: red can override; green only as fallback.
+        # blind_nav mode:
+        # - red always overrides for safety
+        # - green can override when blind text is a path-lost/recovery hint
+        #   (prevents "green detected but hearing lost-path" confusion).
         blind_text = blind.guidance_text or ""
-        traffic_text = self._traffic_guidance_text(green_when_no_blind=(not bool(blind_text)), blind_has_text=bool(blind_text))
+        is_path_lost_hint = self._is_path_lost_hint(blind_text)
+        green_when_no_blind = (not bool(blind_text)) or is_path_lost_hint
+        blind_has_text = bool(blind_text) and not is_path_lost_hint
+        traffic_text = self._traffic_guidance_text(
+            green_when_no_blind=green_when_no_blind,
+            blind_has_text=blind_has_text,
+        )
         final_text = traffic_text if traffic_text else blind_text
         return NavOutput(
             state=STATE_BLIND_NAV,
@@ -123,6 +137,12 @@ class NavigationOrchestrator:
             return "绿灯，可以通行。"
 
         return ""
+
+    def _is_path_lost_hint(self, text: str) -> bool:
+        if not text:
+            return False
+        t = text.strip()
+        return any(k in t for k in self._path_lost_keywords)
 
     def _rate_limit(self, text: str) -> str:
         if not text:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from html import unescape
@@ -122,13 +123,21 @@ class BaiduMapMCP:
                 places = []
                 for p in data.get("results", []) or []:
                     loc = p.get("location", {})
+                    d = (p.get("detail_info") or {}).get("distance")
+                    if d in (None, "", 0, "0"):
+                        try:
+                            plat = float(loc.get("lat"))
+                            plng = float(loc.get("lng"))
+                            d = int(self._haversine_m(lat, lng, plat, plng))
+                        except Exception:
+                            d = None
                     places.append(
                         {
                             "name": p.get("name", ""),
                             "address": p.get("address", ""),
                             "lat": loc.get("lat"),
                             "lng": loc.get("lng"),
-                            "distance": (p.get("detail_info") or {}).get("distance"),
+                            "distance": d,
                         }
                     )
                 return {"success": True, "total": len(places), "places": places}
@@ -194,3 +203,14 @@ class BaiduMapMCP:
             }
         except Exception as e:
             return {"success": False, "error": f"route planning exception: {e}"}
+
+    @staticmethod
+    def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        r = 6371000.0
+        p1 = math.radians(lat1)
+        p2 = math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lng2 - lng1)
+        a = math.sin(dp / 2.0) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2.0) ** 2
+        c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+        return r * c

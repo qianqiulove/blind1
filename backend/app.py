@@ -6,16 +6,18 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
 from starlette.websockets import WebSocketState
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from .auth import AuthConfig, AuthService
 from .assistant_react import AssistantReActEngine
 from .audio_rules import VoiceRuleEngine
 from .baidu_map_mcp import BaiduMapMCP
@@ -30,6 +32,11 @@ from .schemas import (
     MapGeocodeRequest,
     MapReverseGeocodeRequest,
     MapRouteRequest,
+    MobileLoginRequest,
+    MobileLoginResponse,
+    MobileRegisterRequest,
+    MobileResetPasswordRequest,
+    MobileSimpleResponse,
     NavCommandResponse,
 )
 from .xfyun_asr_proxy import XfyunAsrConfig, XfyunAsrProxy
@@ -37,6 +44,7 @@ from .xfyun_asr_proxy import XfyunAsrConfig, XfyunAsrProxy
 
 cfg = build_config()
 app = FastAPI(title="blind-v1-minimal")
+app.add_middleware(SessionMiddleware, secret_key=cfg.secret_key)
 
 runtime: Optional[ModelRuntime] = None
 orchestrator = NavigationOrchestrator(guidance_interval_sec=cfg.guidance_interval_sec)
@@ -44,6 +52,8 @@ voice_engine = VoiceRuleEngine(VOICE_DIR)
 map_engine: Optional[BaiduMapMCP] = None
 assistant_engine: Optional[AssistantReActEngine] = None
 xfyun_asr_proxy: Optional[XfyunAsrProxy] = None
+auth_service: Optional[AuthService] = None
+auth_init_error: str = ""
 
 camera_uploader: Optional[WebSocket] = None
 guidance_clients: Set[WebSocket] = set()
@@ -52,6 +62,9 @@ viewer_clients: Set[WebSocket] = set()
 frame_counter = 0
 last_audio_miss_text = ""
 last_audio_no_client_text = ""
+audio_last_text = ""
+audio_last_ts = 0.0
+STOP_HOTWORDS = ("停止", "停下", "别说了", "安静")
 VIEWER_SEND_EVERY_N = 2
 VIEWER_SEND_TIMEOUT_SEC = 0.03
 MAX_DRAIN_FRAMES_PER_TICK = 16
@@ -60,6 +73,171 @@ INFER_DOWNSCALE_MAX_EDGE = 576
 VIEWER_MAX_EDGE = 448
 VIEWER_JPEG_QUALITY = 32
 CAMERA_IDLE_GRACE_TIMEOUTS = 20
+
+
+def _iso_utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _extract_bearer(authorization: str | None) -> str:
+    if not authorization:
+        return ""
+    raw = authorization.strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("bearer "):
+        return raw[7:].strip()
+    return raw
+
+
+def _require_auth_service() -> AuthService:
+    if auth_service is None:
+        raise HTTPException(status_code=503, detail="auth_service_not_initialized")
+    return auth_service
+
+
+def _auth_unavailable_response() -> HTTPException:
+    if auth_init_error:
+        return HTTPException(status_code=503, detail=f"auth_unavailable: {auth_init_error}")
+    return HTTPException(status_code=503, detail="auth_unavailable")
+
+
+def _session_user(request: Request) -> dict[str, Any] | None:
+    uid = request.session.get("user_id")
+    if not uid:
+        return None
+    try:
+        svc = _require_auth_service()
+        return svc.find_user_by_id(int(uid))
+    except Exception:
+        return None
+
+
+def _is_html_request(request: Request) -> bool:
+    accept = request.headers.get("accept", "").lower()
+    return "text/html" in accept
+
+
+async def require_authenticated_user(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_mobile_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user = _session_user(request)
+    if user:
+        return user
+
+    token = _extract_bearer(authorization) or (x_mobile_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    try:
+        svc = _require_auth_service()
+        user = svc.verify_mobile_token(token)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _auth_unavailable_response() from e
+
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid_or_expired_token")
+    return user
+
+
+async def require_web_session_user(request: Request) -> dict[str, Any]:
+    user = _session_user(request)
+    if user:
+        return user
+    raise HTTPException(status_code=401, detail="web_session_required")
+
+
+async def authenticate_websocket(ws: WebSocket) -> dict[str, Any] | None:
+    scope_session = ws.scope.get("session") if isinstance(ws.scope, dict) else None
+    if isinstance(scope_session, dict):
+        uid = scope_session.get("user_id")
+        if uid:
+            try:
+                svc = _require_auth_service()
+                user = svc.find_user_by_id(int(uid))
+                if user:
+                    return user
+            except Exception:
+                pass
+
+    auth_header = ws.headers.get("authorization")
+    query_token = ws.query_params.get("token", "")
+    header_token = ws.headers.get("x-mobile-token", "")
+    token = query_token or _extract_bearer(auth_header) or header_token
+    if not token:
+        await ws.close(code=4401, reason="unauthorized")
+        return None
+    try:
+        svc = _require_auth_service()
+        user = svc.verify_mobile_token(token)
+    except Exception:
+        await ws.close(code=1011, reason="auth_unavailable")
+        return None
+    if not user:
+        await ws.close(code=4401, reason="invalid_token")
+        return None
+    return user
+
+
+def _render_auth_page(
+    *,
+    title: str,
+    subtitle: str,
+    action: str,
+    submit_text: str,
+    fields_html: str,
+    error: str = "",
+    success: str = "",
+    extra_links_html: str = "",
+) -> HTMLResponse:
+    msg_html = ""
+    if error:
+        msg_html = f'<div class="msg err">{error}</div>'
+    elif success:
+        msg_html = f'<div class="msg ok">{success}</div>'
+    html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <style>
+    body{{margin:0;background:linear-gradient(180deg,#eff6ff,#f8fafc);font-family:"Microsoft YaHei",sans-serif;color:#1f2937}}
+    .wrap{{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}}
+    .card{{width:100%;max-width:420px;background:#fff;border-radius:16px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.08)}}
+    h1{{margin:0 0 6px;color:#0ea5e9}}
+    p{{margin:0 0 14px;color:#475569}}
+    .field{{margin:10px 0}}
+    .field label{{display:block;font-size:13px;color:#475569;margin-bottom:6px}}
+    .field input{{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px;font-size:15px}}
+    .btn{{margin-top:14px;width:100%;border:0;background:#0ea5e9;color:#fff;border-radius:10px;padding:10px 12px;font-size:16px;cursor:pointer}}
+    .links{{margin-top:12px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap}}
+    .links a{{color:#0284c7;text-decoration:none}}
+    .msg{{padding:10px;border-radius:10px;margin-bottom:10px;font-size:14px}}
+    .msg.err{{background:#fee2e2;color:#991b1b}}
+    .msg.ok{{background:#dcfce7;color:#166534}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>{title}</h1>
+      <p>{subtitle}</p>
+      {msg_html}
+      <form method="post" action="{action}">
+        {fields_html}
+        <button class="btn" type="submit">{submit_text}</button>
+      </form>
+      <div class="links">{extra_links_html}</div>
+    </div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 def _extract_contour_norm(mask: np.ndarray | None) -> list[list[float]]:
@@ -130,6 +308,34 @@ async def _broadcast_audio(pcm16: bytes) -> None:
         audio_clients.discard(ws)
 
 
+async def _enqueue_audio_text(
+    text: str,
+    *,
+    source: str,
+    dedupe_sec: float | None = None,
+) -> tuple[bool, str]:
+    global audio_last_text, audio_last_ts
+
+    t = (text or "").strip()
+    if not t:
+        return False, "empty_text"
+
+    if dedupe_sec is None:
+        dedupe_sec = 1.0
+    now = time.monotonic()
+    if t == audio_last_text and (now - audio_last_ts) < max(0.0, float(dedupe_sec)):
+        return False, "deduped"
+
+    pcm16 = voice_engine.synthesize(t)
+    if not pcm16:
+        return False, "miss_mapping"
+
+    await _broadcast_audio(pcm16)
+    audio_last_text = t
+    audio_last_ts = now
+    return True, "played"
+
+
 def _render_viewer_frame(bgr: np.ndarray, mask: np.ndarray | None) -> bytes | None:
     frame = bgr.copy()
     h0, w0 = frame.shape[:2]
@@ -196,7 +402,7 @@ async def _broadcast_viewer_jpeg(jpg_bytes: bytes | None) -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    global runtime, map_engine, assistant_engine, xfyun_asr_proxy
+    global runtime, map_engine, assistant_engine, xfyun_asr_proxy, auth_service, auth_init_error
     _check_models()
     runtime = ModelRuntime(str(cfg.blind_model), str(cfg.traffic_model), cfg.device)
     runtime.load()
@@ -234,7 +440,38 @@ async def startup() -> None:
         print(f"[BLIND][ASR] xfyun webapi enabled host={cfg.xfyun_asr_host}{cfg.xfyun_asr_path}")
     else:
         print("[BLIND][ASR] xfyun webapi disabled: set XFYUN_ASR_APP_ID/XFYUN_ASR_API_KEY/XFYUN_ASR_API_SECRET")
+    auth_service = AuthService(
+        AuthConfig(
+            mysql_host=cfg.mysql_host,
+            mysql_port=cfg.mysql_port,
+            mysql_user=cfg.mysql_user,
+            mysql_password=cfg.mysql_password,
+            mysql_database=cfg.mysql_database,
+            token_expire_hours=cfg.token_expire_hours,
+            smtp_host=cfg.smtp_host,
+            smtp_port=cfg.smtp_port,
+            smtp_user=cfg.smtp_user,
+            smtp_password=cfg.smtp_password,
+            smtp_use_tls=cfg.smtp_use_tls,
+            smtp_use_ssl=cfg.smtp_use_ssl,
+            mail_from=cfg.mail_from,
+        )
+    )
+    auth_init_error = ""
+    try:
+        auth_service.init_schema()
+        print(
+            f"[BLIND][AUTH] mysql_ready host={cfg.mysql_host}:{cfg.mysql_port} db={cfg.mysql_database} token_expire_h={cfg.token_expire_hours}"
+        )
+    except Exception as e:
+        auth_init_error = str(e)
+        print(f"[BLIND][AUTH] init_failed {e}")
     print(f"[BLIND] project_root={PROJECT_ROOT}")
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    pass
 
 
 @app.get("/health")
@@ -242,6 +479,8 @@ async def health() -> dict:
     return {
         "ok": True,
         "runtime_loaded": runtime is not None,
+        "auth_ready": bool(auth_service is not None and not auth_init_error),
+        "auth_error": auth_init_error,
         "nav_enabled": orchestrator.nav_enabled,
         "state": orchestrator.state,
         "mode": orchestrator.mode,
@@ -249,33 +488,479 @@ async def health() -> dict:
     }
 
 
+@app.get("/")
+async def index(request: Request) -> RedirectResponse:
+    if _session_user(request):
+        return RedirectResponse(url="/web", status_code=302)
+    return RedirectResponse(url="/login", status_code=302)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, msg: str = "") -> HTMLResponse:
+    if _session_user(request):
+        return HTMLResponse('<meta http-equiv="refresh" content="0;url=/web">')
+    fields = """
+    <div class="field"><label>用户名或邮箱</label><input name="username" placeholder="请输入用户名或邮箱" /></div>
+    <div class="field"><label>密码</label><input name="password" type="password" placeholder="请输入密码" /></div>
+    """
+    links = '<a href="/register">注册</a><a href="/forget_password">忘记密码</a>'
+    return _render_auth_page(
+        title="blind 登录",
+        subtitle="登录后可访问导航控制台与移动端接口",
+        action="/login",
+        submit_text="登录",
+        fields_html=fields,
+        success=msg,
+        extra_links_html=links,
+    )
+
+
+@app.post("/login")
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+) -> RedirectResponse:
+    try:
+        svc = _require_auth_service()
+        user = svc.verify_user(username, password)
+    except Exception as e:
+        raise _auth_unavailable_response() from e
+    if not user:
+        return RedirectResponse(url="/login?msg=用户名或密码错误", status_code=302)
+    request.session["user_id"] = user["user_id"]
+    request.session["username"] = user["username"]
+    request.session["user_settings"] = user.get("user_settings", {})
+    return RedirectResponse(url="/web", status_code=302)
+
+
+@app.get("/register", response_class=HTMLResponse)
+async def register_page(msg: str = "", err: str = "") -> HTMLResponse:
+    fields = """
+    <div class="field"><label>用户名</label><input name="username" placeholder="请输入用户名" /></div>
+    <div class="field"><label>邮箱</label><input name="email" placeholder="请输入邮箱" /></div>
+    <div class="field"><label>验证码</label><input name="code" placeholder="6位验证码" /></div>
+    <div class="field"><button type="button" onclick="sendCode('register')">发送验证码</button></div>
+    <div class="field"><label>密码</label><input name="password" type="password" placeholder="请输入密码" /></div>
+    """
+    script_links = """
+    <a href="/login">返回登录</a>
+    <script>
+    async function sendCode(purpose){
+      const email = document.querySelector('input[name="email"]').value.trim();
+      if(!email){ alert("请先输入邮箱"); return; }
+      const r = await fetch('/send_verification_code', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({email, purpose})
+      });
+      const j = await r.json();
+      alert(j.message || (j.status === 'ok' ? '验证码已发送' : '发送失败'));
+    }
+    </script>
+    """
+    return _render_auth_page(
+        title="注册账号",
+        subtitle="验证码有效期 10 分钟",
+        action="/register",
+        submit_text="注册",
+        fields_html=fields,
+        error=err,
+        success=msg,
+        extra_links_html=script_links,
+    )
+
+
+@app.post("/register")
+async def register_submit(
+    username: str = Form(...),
+    email: str = Form(...),
+    code: str = Form(...),
+    password: str = Form(...),
+) -> RedirectResponse:
+    try:
+        svc = _require_auth_service()
+        if not svc.consume_email_code(email, code, "register"):
+            return RedirectResponse(url="/register?err=验证码错误或已过期", status_code=302)
+        svc.create_user(username=username, email=email, password=password)
+    except ValueError as e:
+        if str(e) == "username_or_email_exists":
+            return RedirectResponse(url="/register?err=用户名或邮箱已存在", status_code=302)
+        return RedirectResponse(url="/register?err=注册参数无效", status_code=302)
+    except Exception:
+        return RedirectResponse(url="/register?err=注册失败，请稍后重试", status_code=302)
+    return RedirectResponse(url="/login?msg=注册成功，请登录", status_code=302)
+
+
+@app.get("/forget_password", response_class=HTMLResponse)
+async def forget_page(msg: str = "", err: str = "") -> HTMLResponse:
+    fields = """
+    <div class="field"><label>邮箱</label><input name="email" placeholder="注册邮箱" /></div>
+    <div class="field"><label>验证码</label><input name="code" placeholder="6位验证码" /></div>
+    <div class="field"><button type="button" onclick="sendCode('reset')">发送验证码</button></div>
+    <div class="field"><label>新密码</label><input name="new_password" type="password" placeholder="请输入新密码" /></div>
+    """
+    links = """
+    <a href="/login">返回登录</a>
+    <script>
+    async function sendCode(purpose){
+      const email = document.querySelector('input[name="email"]').value.trim();
+      if(!email){ alert("请先输入邮箱"); return; }
+      const r = await fetch('/send_verification_code', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({email, purpose})
+      });
+      const j = await r.json();
+      alert(j.message || (j.status === 'ok' ? '验证码已发送' : '发送失败'));
+    }
+    </script>
+    """
+    return _render_auth_page(
+        title="找回密码",
+        subtitle="重置后旧密码将失效",
+        action="/forget_password",
+        submit_text="重置密码",
+        fields_html=fields,
+        error=err,
+        success=msg,
+        extra_links_html=links,
+    )
+
+
+@app.post("/forget_password")
+async def forget_submit(
+    email: str = Form(...),
+    code: str = Form(...),
+    new_password: str = Form(...),
+) -> RedirectResponse:
+    try:
+        svc = _require_auth_service()
+        if not svc.consume_reset_code(email, code):
+            return RedirectResponse(url="/forget_password?err=验证码错误或已过期", status_code=302)
+        ok = svc.update_password(email=email, new_password=new_password)
+        if not ok:
+            return RedirectResponse(url="/forget_password?err=邮箱不存在", status_code=302)
+    except Exception:
+        return RedirectResponse(url="/forget_password?err=重置失败，请稍后重试", status_code=302)
+    return RedirectResponse(url="/login?msg=密码重置成功，请登录", status_code=302)
+
+
+@app.post("/send_verification_code")
+async def send_verification_code(request: Request) -> JSONResponse:
+    payload: dict[str, Any] = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        form = await request.form()
+        payload = dict(form.items())
+
+    email = str(payload.get("email", "")).strip()
+    purpose = str(payload.get("purpose", "register")).strip().lower()
+    if purpose not in {"register", "reset"}:
+        purpose = "register"
+    if not email:
+        return JSONResponse({"status": "error", "message": "邮箱不能为空"}, status_code=400)
+    try:
+        svc = _require_auth_service()
+        if purpose == "reset":
+            code = svc.create_reset_code(email=email)
+            subject = "blind 找回密码验证码"
+            content = f"您的找回密码验证码是：{code}，10分钟内有效。"
+        else:
+            code = svc.create_email_code(email=email, purpose="register")
+            subject = "blind 注册验证码"
+            content = f"您的注册验证码是：{code}，10分钟内有效。"
+        sent = svc.send_mail(email, subject, content)
+        msg = "验证码已发送邮箱" if sent else "验证码已生成（SMTP未配置，已输出到后端日志）"
+        return JSONResponse({"status": "ok", "message": msg})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": f"发送失败: {e}"}, status_code=500)
+
+
+@app.post("/logout")
+async def web_logout(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_mobile_token: str | None = Header(default=None),
+) -> RedirectResponse:
+    token = _extract_bearer(authorization) or (x_mobile_token or "").strip()
+    request.session.clear()
+    try:
+        if token:
+            svc = _require_auth_service()
+            svc.revoke_mobile_token(token)
+    except Exception:
+        pass
+    return RedirectResponse(url="/login?msg=已退出登录", status_code=302)
+
+
+@app.post("/api/mobile/auth/login", response_model=MobileLoginResponse)
+async def mobile_auth_login(req: MobileLoginRequest) -> MobileLoginResponse:
+    try:
+        svc = _require_auth_service()
+        user = svc.verify_user(req.username, req.password)
+    except Exception as e:
+        raise _auth_unavailable_response() from e
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid_credentials")
+    token, expires_at = svc.create_mobile_token(user_id=user["user_id"])
+    return MobileLoginResponse(
+        token=token,
+        expires_at=expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        user=user,
+    )
+
+
+@app.post("/api/mobile/auth/register", response_model=MobileSimpleResponse)
+async def mobile_auth_register(req: MobileRegisterRequest) -> MobileSimpleResponse:
+    try:
+        svc = _require_auth_service()
+        if not svc.consume_email_code(req.email, req.code, "register"):
+            raise HTTPException(status_code=400, detail="invalid_or_expired_code")
+        svc.create_user(username=req.username, email=req.email, password=req.password)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        if str(e) == "username_or_email_exists":
+            raise HTTPException(status_code=400, detail="username_or_email_exists") from e
+        raise HTTPException(status_code=400, detail="invalid_register_payload") from e
+    except Exception as e:
+        raise _auth_unavailable_response() from e
+    return MobileSimpleResponse(status="ok", message="registered")
+
+
+@app.post("/api/mobile/auth/reset-password", response_model=MobileSimpleResponse)
+async def mobile_auth_reset_password(req: MobileResetPasswordRequest) -> MobileSimpleResponse:
+    try:
+        svc = _require_auth_service()
+        if not svc.consume_reset_code(req.email, req.code):
+            raise HTTPException(status_code=400, detail="invalid_or_expired_code")
+        ok = svc.update_password(email=req.email, new_password=req.new_password)
+        if not ok:
+            raise HTTPException(status_code=404, detail="email_not_found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _auth_unavailable_response() from e
+    return MobileSimpleResponse(status="ok", message="password_reset")
+
+
+@app.post("/api/mobile/auth/logout", response_model=MobileSimpleResponse)
+async def mobile_auth_logout(
+    authorization: str | None = Header(default=None),
+    x_mobile_token: str | None = Header(default=None),
+) -> MobileSimpleResponse:
+    token = _extract_bearer(authorization) or (x_mobile_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="token_required")
+    try:
+        svc = _require_auth_service()
+        svc.revoke_mobile_token(token)
+    except Exception as e:
+        raise _auth_unavailable_response() from e
+    return MobileSimpleResponse(status="ok", message="logged_out")
+
+
+@app.post("/api/mobile/auth/refresh", response_model=MobileLoginResponse)
+async def mobile_auth_refresh(
+    authorization: str | None = Header(default=None),
+    x_mobile_token: str | None = Header(default=None),
+) -> MobileLoginResponse:
+    token = _extract_bearer(authorization) or (x_mobile_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="token_required")
+    try:
+        svc = _require_auth_service()
+        refreshed = svc.refresh_mobile_token(token)
+    except Exception as e:
+        raise _auth_unavailable_response() from e
+    if not refreshed:
+        raise HTTPException(status_code=401, detail="invalid_or_expired_token")
+    new_token, expires_at, user = refreshed
+    return MobileLoginResponse(
+        token=new_token,
+        expires_at=expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        user=user,
+    )
+
+
+@app.get("/web", response_class=HTMLResponse)
+async def web_console(request: Request) -> HTMLResponse:
+    if not _session_user(request):
+        return RedirectResponse(url="/login", status_code=302)
+    html = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>blind-v1 轻量导航端</title>
+  <style>
+    body{font-family:"Microsoft YaHei",sans-serif;background:#f4f6f8;margin:0;padding:16px;color:#1f2937}
+    .wrap{max-width:920px;margin:0 auto;display:grid;gap:12px}
+    .card{background:#fff;border-radius:12px;padding:12px;box-shadow:0 4px 16px rgba(0,0,0,.08)}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    .btn{border:0;background:#2563eb;color:#fff;padding:10px 14px;border-radius:8px;cursor:pointer}
+    .btn.stop{background:#dc2626}
+    .mono{font-family:Consolas,monospace}
+    .status{font-size:14px;background:#eef2ff;border-radius:8px;padding:8px}
+    #viewer{width:100%;max-height:340px;object-fit:contain;background:#000;border-radius:8px}
+    #chatLog{max-height:280px;overflow:auto;background:#f8fafc;padding:8px;border-radius:8px}
+    .msg{margin:6px 0}
+    textarea{width:100%;min-height:64px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h3>轻量导航控制台</h3>
+      <div class="row">
+        <input id="base" class="mono" style="flex:1;padding:8px" value="" />
+        <button class="btn" id="btnStart">一键开始导航</button>
+        <button class="btn stop" id="btnStop">停止导航</button>
+      </div>
+      <div id="status" class="status" style="margin-top:8px">状态：未连接</div>
+      <div id="guidance" class="status" style="margin-top:8px">播报：-</div>
+    </div>
+    <div class="card">
+      <h4>视频预览</h4>
+      <img id="viewer" alt="viewer" />
+    </div>
+    <div class="card">
+      <h4>AI 助手（文本）</h4>
+      <textarea id="q" placeholder="输入问题，例如：我现在在哪？"></textarea>
+      <div class="row" style="margin-top:8px"><button class="btn" id="btnAsk">发送</button></div>
+      <div id="chatLog"></div>
+    </div>
+  </div>
+<script>
+(() => {
+  const qs = new URLSearchParams(location.search);
+  const defaultBase = qs.get("base") || `${location.protocol}//${location.hostname}:8088`;
+  const elBase = document.getElementById("base");
+  const elStatus = document.getElementById("status");
+  const elGuidance = document.getElementById("guidance");
+  const elViewer = document.getElementById("viewer");
+  const elChat = document.getElementById("chatLog");
+  const elQ = document.getElementById("q");
+  elBase.value = defaultBase;
+  let wsGuidance = null;
+  let wsViewer = null;
+
+  function wsBase() {
+    const b = elBase.value.trim() || defaultBase;
+    return b.replace("http://", "ws://").replace("https://", "wss://");
+  }
+  function httpBase() { return elBase.value.trim() || defaultBase; }
+  function setStatus(t){ elStatus.textContent = "状态：" + t; }
+  function addMsg(t){ const d=document.createElement("div"); d.className="msg"; d.textContent=t; elChat.appendChild(d); elChat.scrollTop=elChat.scrollHeight; }
+
+  function connectWS() {
+    if (wsGuidance) wsGuidance.close();
+    if (wsViewer) wsViewer.close();
+    wsGuidance = new WebSocket(wsBase() + "/ws/guidance");
+    wsGuidance.onopen = () => { setStatus("已连接，导航中"); wsGuidance.send("hello"); };
+    wsGuidance.onmessage = (e) => {
+      try {
+        const o = JSON.parse(e.data);
+        const g = (o.guidance_text || "").trim();
+        elGuidance.textContent = "播报：" + (g || "（空闲或无新提示）");
+      } catch {}
+    };
+    wsGuidance.onerror = () => setStatus("网络异常（guidance）");
+    wsGuidance.onclose = () => setStatus("连接已断开");
+
+    wsViewer = new WebSocket(wsBase() + "/ws/viewer");
+    wsViewer.binaryType = "arraybuffer";
+    wsViewer.onopen = () => wsViewer.send("hello");
+    wsViewer.onmessage = (e) => {
+      const blob = new Blob([e.data], {type:"image/jpeg"});
+      elViewer.src = URL.createObjectURL(blob);
+    };
+    wsViewer.onerror = () => setStatus("网络异常（viewer）");
+  }
+
+  async function startNav() {
+    setStatus("连接中...");
+    connectWS();
+    try {
+      await fetch(httpBase()+"/api/nav/start?mode=blind_nav", {method:"POST"});
+    } catch (e) {
+      setStatus("网络异常（start 失败）");
+    }
+  }
+  async function stopNav() {
+    try {
+      await fetch(httpBase()+"/api/nav/stop", {method:"POST"});
+    } catch {}
+    if (wsGuidance) wsGuidance.close();
+    if (wsViewer) wsViewer.close();
+    elGuidance.textContent = "播报：-";
+    setStatus("已停止");
+  }
+
+  document.getElementById("btnStart").onclick = startNav;
+  document.getElementById("btnStop").onclick = stopNav;
+  document.getElementById("btnAsk").onclick = async () => {
+    const q = elQ.value.trim(); if (!q) return;
+    addMsg("你：" + q);
+    elQ.value = "";
+    try {
+      const r = await fetch(httpBase()+"/api/assistant/chat", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({message:q,user_location:null,chat_history:[]})
+      });
+      const j = await r.json();
+      addMsg("助手：" + (j.content || "无回复"));
+    } catch (e) {
+      addMsg("助手：请求失败");
+    }
+  };
+})();
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
 @app.post("/api/nav/start", response_model=NavCommandResponse)
-async def nav_start(mode: str = MODE_BLIND_NAV) -> NavCommandResponse:
+async def nav_start(mode: str = MODE_BLIND_NAV, _: dict[str, Any] = Depends(require_authenticated_user)) -> NavCommandResponse:
     run_mode = MODE_TRAFFIC_TEST if mode == MODE_TRAFFIC_TEST else MODE_BLIND_NAV
     orchestrator.start(mode=run_mode)
     return NavCommandResponse(nav_enabled=orchestrator.nav_enabled, state=orchestrator.state, mode=orchestrator.mode)
 
 
 @app.post("/api/traffic-test/start", response_model=NavCommandResponse)
-async def traffic_test_start() -> NavCommandResponse:
+async def traffic_test_start(_: dict[str, Any] = Depends(require_authenticated_user)) -> NavCommandResponse:
     orchestrator.start(mode=MODE_TRAFFIC_TEST)
     return NavCommandResponse(nav_enabled=orchestrator.nav_enabled, state=orchestrator.state, mode=orchestrator.mode)
 
 
 @app.post("/api/nav/stop", response_model=NavCommandResponse)
-async def nav_stop() -> NavCommandResponse:
+async def nav_stop(_: dict[str, Any] = Depends(require_authenticated_user)) -> NavCommandResponse:
     orchestrator.stop()
     return NavCommandResponse(nav_enabled=orchestrator.nav_enabled, state=orchestrator.state, mode=orchestrator.mode)
 
 
 @app.post("/api/traffic-test/stop", response_model=NavCommandResponse)
-async def traffic_test_stop() -> NavCommandResponse:
+async def traffic_test_stop(_: dict[str, Any] = Depends(require_authenticated_user)) -> NavCommandResponse:
     orchestrator.stop()
     return NavCommandResponse(nav_enabled=orchestrator.nav_enabled, state=orchestrator.state, mode=orchestrator.mode)
 
 
 @app.post("/api/assistant/chat")
-async def assistant_chat(req: AssistantChatRequest) -> AssistantChatResponse:
+async def assistant_chat(req: AssistantChatRequest, _: dict[str, Any] = Depends(require_authenticated_user)) -> AssistantChatResponse:
+    msg_text = (req.message or "").strip()
+    if msg_text and any(k in msg_text for k in STOP_HOTWORDS):
+        return AssistantChatResponse(
+            status="ok",
+            content="已停止当前语音播报。",
+            iterations=0,
+            tool_history=[],
+            error="",
+        )
+
     def _execute_map_tool(action: str, params: dict) -> dict:
         if map_engine is None:
             return {"success": False, "error": "map_tool_disabled: BAIDU_MAP_AK not configured"}
@@ -439,7 +1124,7 @@ async def assistant_chat(req: AssistantChatRequest) -> AssistantChatResponse:
 
 
 @app.post("/api/map/route")
-async def map_route(req: MapRouteRequest) -> JSONResponse:
+async def map_route(req: MapRouteRequest, _: dict[str, Any] = Depends(require_authenticated_user)) -> JSONResponse:
     if map_engine is None:
         payload = FeatureDisabledResponse(message="Map route API disabled: BAIDU_MAP_AK not configured.").model_dump()
         return JSONResponse(content=payload, status_code=501)
@@ -455,7 +1140,13 @@ async def map_route(req: MapRouteRequest) -> JSONResponse:
 
 
 @app.get("/api/map/nearby")
-async def map_nearby(query: str, lat: float, lng: float, radius: int = 1000) -> JSONResponse:
+async def map_nearby(
+    query: str,
+    lat: float,
+    lng: float,
+    radius: int = 1000,
+    _: dict[str, Any] = Depends(require_authenticated_user),
+) -> JSONResponse:
     if map_engine is None:
         payload = FeatureDisabledResponse(message="Nearby map API disabled: BAIDU_MAP_AK not configured.").model_dump()
         return JSONResponse(content=payload, status_code=501)
@@ -464,7 +1155,7 @@ async def map_nearby(query: str, lat: float, lng: float, radius: int = 1000) -> 
 
 
 @app.post("/api/map/geocode")
-async def map_geocode(req: MapGeocodeRequest) -> JSONResponse:
+async def map_geocode(req: MapGeocodeRequest, _: dict[str, Any] = Depends(require_authenticated_user)) -> JSONResponse:
     if map_engine is None:
         payload = FeatureDisabledResponse(message="Geocoding disabled: BAIDU_MAP_AK not configured.").model_dump()
         return JSONResponse(content=payload, status_code=501)
@@ -473,7 +1164,10 @@ async def map_geocode(req: MapGeocodeRequest) -> JSONResponse:
 
 
 @app.post("/api/map/reverse-geocode")
-async def map_reverse_geocode(req: MapReverseGeocodeRequest) -> JSONResponse:
+async def map_reverse_geocode(
+    req: MapReverseGeocodeRequest,
+    _: dict[str, Any] = Depends(require_authenticated_user),
+) -> JSONResponse:
     if map_engine is None:
         payload = FeatureDisabledResponse(message="Reverse geocoding disabled: BAIDU_MAP_AK not configured.").model_dump()
         return JSONResponse(content=payload, status_code=501)
@@ -483,8 +1177,11 @@ async def map_reverse_geocode(req: MapReverseGeocodeRequest) -> JSONResponse:
 
 @app.websocket("/ws/asr_proxy")
 async def ws_asr_proxy(ws: WebSocket) -> None:
+    user = await authenticate_websocket(ws)
+    if not user:
+        return
     await ws.accept()
-    print("[BLIND][ASR] client connected")
+    print(f"[BLIND][ASR] client connected user={user.get('username', 'unknown')}")
     if xfyun_asr_proxy is None or not xfyun_asr_proxy.enabled:
         await ws.send_json(
             {
@@ -667,14 +1364,21 @@ async def ws_asr_proxy(ws: WebSocket) -> None:
 
 @app.websocket("/ws/guidance")
 async def ws_guidance(ws: WebSocket) -> None:
+    user = await authenticate_websocket(ws)
+    if not user:
+        return
     await ws.accept()
-    print("[BLIND][GUIDANCE] connected")
+    print(f"[BLIND][GUIDANCE] connected user={user.get('username', 'unknown')}")
     guidance_clients.add(ws)
     try:
         while True:
-            await ws.receive_text()
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        print(f"[BLIND][GUIDANCE] socket error: {e}")
     finally:
         guidance_clients.discard(ws)
         print("[BLIND][GUIDANCE] disconnected")
@@ -682,14 +1386,21 @@ async def ws_guidance(ws: WebSocket) -> None:
 
 @app.websocket("/ws/audio")
 async def ws_audio(ws: WebSocket) -> None:
+    user = await authenticate_websocket(ws)
+    if not user:
+        return
     await ws.accept()
-    print("[BLIND][AUDIO] connected")
+    print(f"[BLIND][AUDIO] connected user={user.get('username', 'unknown')}")
     audio_clients.add(ws)
     try:
         while True:
-            await ws.receive_text()
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        print(f"[BLIND][AUDIO] socket error: {e}")
     finally:
         audio_clients.discard(ws)
         print("[BLIND][AUDIO] disconnected")
@@ -697,14 +1408,21 @@ async def ws_audio(ws: WebSocket) -> None:
 
 @app.websocket("/ws/viewer")
 async def ws_viewer(ws: WebSocket) -> None:
+    user = await authenticate_websocket(ws)
+    if not user:
+        return
     await ws.accept()
-    print("[BLIND][VIEWER] connected")
+    print(f"[BLIND][VIEWER] connected user={user.get('username', 'unknown')}")
     viewer_clients.add(ws)
     try:
         while True:
-            await ws.receive_text()
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        print(f"[BLIND][VIEWER] socket error: {e}")
     finally:
         viewer_clients.discard(ws)
         print("[BLIND][VIEWER] disconnected")
@@ -713,6 +1431,9 @@ async def ws_viewer(ws: WebSocket) -> None:
 @app.websocket("/ws/camera")
 async def ws_camera(ws: WebSocket) -> None:
     global camera_uploader, frame_counter, last_audio_miss_text, last_audio_no_client_text
+    user = await authenticate_websocket(ws)
+    if not user:
+        return
     if camera_uploader is not None and camera_uploader.client_state == WebSocketState.CONNECTED:
         try:
             await camera_uploader.close(code=1000)
@@ -720,7 +1441,7 @@ async def ws_camera(ws: WebSocket) -> None:
             pass
     camera_uploader = ws
     await ws.accept()
-    print("[BLIND][CAMERA] connected")
+    print(f"[BLIND][CAMERA] connected user={user.get('username', 'unknown')}")
 
     if runtime is None:
         await ws.close(code=1011)
@@ -804,17 +1525,22 @@ async def ws_camera(ws: WebSocket) -> None:
             )
             await _broadcast_guidance(payload)
             if nav.guidance_text:
-                pcm16 = voice_engine.synthesize(nav.guidance_text)
-                if not pcm16:
+                queued, reason = await _enqueue_audio_text(
+                    nav.guidance_text,
+                    source="nav",
+                )
+                if not queued and reason == "miss_mapping":
                     if nav.guidance_text != last_audio_miss_text:
                         print(f"[BLIND][AUDIO] miss_mapping text={nav.guidance_text}")
                         last_audio_miss_text = nav.guidance_text
+                elif reason == "deduped":
+                    pass
                 elif not audio_clients:
                     if nav.guidance_text != last_audio_no_client_text:
                         print(f"[BLIND][AUDIO] no_audio_client text={nav.guidance_text}")
                         last_audio_no_client_text = nav.guidance_text
-                else:
-                    await _broadcast_audio(pcm16)
+                elif not queued and reason != "deduped":
+                    print(f"[BLIND][AUDIO] enqueue_skip reason={reason} text={nav.guidance_text}")
             if frame_counter % VIEWER_SEND_EVERY_N == 0:
                 viewer_jpg = _render_viewer_frame(bgr, blind.mask)
                 await _broadcast_viewer_jpeg(viewer_jpg)
@@ -830,6 +1556,10 @@ async def ws_camera(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        # Safety fallback: camera uploader disconnected, force navigation to idle
+        # and clear debounce/runtime state to avoid stale guidance replay.
+        if orchestrator.nav_enabled:
+            orchestrator.stop()
         if camera_uploader is ws:
             camera_uploader = None
         print(

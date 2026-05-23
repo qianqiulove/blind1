@@ -2,9 +2,10 @@
 
 ## Scope
 - Blind path detection (`yolo-seg.pt`)
-- Traffic light detection (`trafficlight.pt`)
+- Traffic light detection (`best.pt`)
 - Navigation guidance text + backend voice stream
-- AI and map APIs reserved (return 501)
+- AI assistant and map APIs
+- Lightweight web console for user mode
 
 ## Structure
 - `backend/` FastAPI websocket backend
@@ -25,9 +26,10 @@ Copy-Item .\config\.env.example .\config\.env
 - `WS /ws/camera` upload camera JPEG frames
 - `WS /ws/guidance` receive state + guidance text
 - `WS /ws/audio` receive PCM16 mono 8k audio stream
+- `WS /ws/asr_proxy` stream ASR proxy for app microphone
 - `POST /api/nav/start`
 - `POST /api/nav/stop`
-- `POST /api/assistant/chat` -> 501
-- `POST /api/map/route` -> 501
-- `GET /api/map/nearby` -> 501
-
+- `POST /api/assistant/chat`
+- `POST /api/map/route`
+- `GET /api/map/nearby`
+- `GET /web` lightweight web UI entry
